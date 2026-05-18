@@ -32,6 +32,9 @@ jobs:
         with:
           name: macos
           path: dist/DMP-WS-Door-Chart-Generator-macOS.zip
+          # Temporary hand-off to the release job — published Release assets
+          # are stored separately and don't count against Actions storage.
+          retention-days: 1
 
   build-windows:
     runs-on: windows-latest
@@ -52,6 +55,7 @@ jobs:
         with:
           name: windows
           path: "dist/DMP WS & Door Chart Generator.exe"
+          retention-days: 1
 
   release:
     needs: [build-macos, build-windows]
