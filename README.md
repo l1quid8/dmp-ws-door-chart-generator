@@ -68,35 +68,13 @@ Release and send it over **Teams** (email servers block executables). They:
    `.exe` and the `_internal/` folder together — the app needs both.
 2. Open the extracted folder and double-click the `.exe`.
 3. If Windows SmartScreen shows "Windows protected your PC", click
-   **More info → Run anyway** (one click, not an install). Code-signed
-   releases (see below) do not show this.
+   **More info → Run anyway** (one click, not an install).
 
 They never touch GitHub or the source code.
 
 The build is deliberately **one-folder** (not one-file) and **UPX-free** so it
 is not blocked by AppLocker `%TEMP%` rules or flagged as a false positive by
 antivirus on managed/corporate Windows machines.
-
-## Code signing (Windows — optional, recommended for wide sharing)
-
-Released Windows builds are code-signed automatically **if** Azure Trusted
-Signing secrets are configured on the repo. A signed `.exe` has a verified
-publisher, which clears SmartScreen's "unknown publisher" warning and stops
-antivirus/EDR from flagging it on managed machines.
-
-One-time setup:
-
-1. Create an **Azure Trusted Signing** account (~$10/month), add a certificate
-   profile, and complete the one-time identity validation.
-2. Create an Azure AD app registration with access to the signing account.
-3. Add these repository secrets (Settings → Secrets and variables → Actions):
-   - `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
-   - `AZURE_TS_ENDPOINT` — e.g. `https://eus.codesigning.azure.net`
-   - `AZURE_TS_ACCOUNT` — Trusted Signing account name
-   - `AZURE_TS_PROFILE` — certificate profile name
-
-`release.yml` signs the `.exe` only when these secrets exist; without them the
-build still succeeds and produces an unsigned `.zip`.
 
 ## Output location
 

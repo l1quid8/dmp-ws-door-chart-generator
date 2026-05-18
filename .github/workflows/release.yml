@@ -38,10 +38,6 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
-    env:
-      # Code signing runs only when these secrets are set (see README,
-      # "Code signing"). Until then the build still succeeds, just unsigned.
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -55,18 +51,6 @@ jobs:
           pip install -r requirements.txt
       - name: Build app (one-folder)
         run: pyinstaller --noconfirm dmp_doorchart.spec
-      - name: Sign the .exe (Azure Trusted Signing)
-        if: env.AZURE_CLIENT_ID != ''
-        uses: azure/trusted-signing-action@v0.5.1   # verify latest: github.com/Azure/trusted-signing-action/releases
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ secrets.AZURE_TS_ENDPOINT }}
-          trusted-signing-account-name: ${{ secrets.AZURE_TS_ACCOUNT }}
-          certificate-profile-name: ${{ secrets.AZURE_TS_PROFILE }}
-          files-folder: dist/DMP WS & Door Chart Generator
-          files-folder-filter: exe
       - name: Zip the app folder
         shell: pwsh
         run: |
