@@ -1,0 +1,26 @@
+# Virtual environments (per-machine, never shared)
+venv/
+build-venv/
+
+# PyInstaller build output
+build/
+dist/
+
+# Working data
+input/
+output/
+generated_worksheets/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Local tooling state
+.collab/
+
+# OS / editor junk
+.DS_Store
+*.spec~
