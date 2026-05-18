@@ -8,7 +8,9 @@ cd /d "%~dp0"
 
 set "BUILD_HOME=%USERPROFILE%\.dmp-doorchart"
 set "VENV=%BUILD_HOME%\venv"
-set "APP_NAME=DMP WS ^& Door Chart Generator"
+REM Inside set "..." quotes the & is literal, so no ^ escape is needed (and a
+REM ^ would become part of the value). Every use of %APP_NAME% below is quoted.
+set "APP_NAME=DMP WS & Door Chart Generator"
 
 echo ==^> Project:    %CD%
 echo ==^> Build home: %BUILD_HOME%  (local, never synced)
@@ -64,11 +66,21 @@ echo ==^> Building (this takes a few minutes)...
 "%VENV%\Scripts\pyinstaller" --noconfirm --distpath "%BUILD_HOME%\dist" --workpath "%BUILD_HOME%\build" dmp_doorchart.spec
 if errorlevel 1 ( echo ERROR: build failed. & pause & exit /b 1 )
 
-REM 7. Copy to Desktop ------------------------------------------------------
-copy /Y "%BUILD_HOME%\dist\%APP_NAME%.exe" "%USERPROFILE%\Desktop\" >nul
-if errorlevel 1 ( echo ERROR: could not copy the .exe to the Desktop. & pause & exit /b 1 )
+REM 7. Copy app folder to Desktop -------------------------------------------
+REM    The build produces a one-folder app, not a single .exe. Resolve the
+REM    real Desktop path -- it may be redirected into OneDrive, in which case
+REM    %USERPROFILE%\Desktop does not exist.
+set "DESKTOP=%USERPROFILE%\Desktop"
+for /f "tokens=2,*" %%A in ('reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" /v Desktop 2^>nul ^| findstr /C:"REG_"') do call set "DESKTOP=%%B"
+if not exist "%DESKTOP%" set "DESKTOP=%USERPROFILE%\Desktop"
+
+echo ==^> Copying app to the Desktop...
+if exist "%DESKTOP%\%APP_NAME%\" rmdir /S /Q "%DESKTOP%\%APP_NAME%"
+xcopy /E /I /Y /Q "%BUILD_HOME%\dist\%APP_NAME%" "%DESKTOP%\%APP_NAME%\" >nul
+if errorlevel 1 ( echo ERROR: could not copy the app to the Desktop. & pause & exit /b 1 )
 
 echo.
-echo ==^> Done. App copied to your Desktop:
-echo     %USERPROFILE%\Desktop\%APP_NAME%.exe
+echo ==^> Done. App folder copied to your Desktop:
+echo     "%DESKTOP%\%APP_NAME%"
+echo     Open that folder and double-click the app to run it.
 pause

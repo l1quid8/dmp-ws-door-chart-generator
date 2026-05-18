@@ -5,7 +5,7 @@ Excel deliverables: a **DMP Installation Worksheet** and a **Door Chart**.
 
 One codebase runs on both operating systems — platform differences are handled
 at runtime via `sys.platform` checks. The app is built into a native `.app`
-(macOS) or single-file `.exe` (Windows).
+(macOS) or a one-folder app — a folder holding the `.exe` (Windows).
 
 ## Repository layout
 
@@ -32,7 +32,7 @@ Build output, virtualenvs, and working data are **not** committed — see
 3. Clone this repo (anywhere **outside** OneDrive, e.g. `~/Projects/`).
 4. Build:
    - macOS: double-click `build_mac.command` → app installed to `~/Applications/`
-   - Windows: double-click `build_windows.bat` → app copied to your Desktop
+   - Windows: double-click `build_windows.bat` → app folder copied to your Desktop
 5. Launch the built app.
 
 The build script creates its own virtualenv at `~/.dmp-doorchart/` (local, never
@@ -56,20 +56,47 @@ GitHub Release for that tag. The Release is the version archive.
 
 ## Sharing with a colleague (Windows, no install)
 
-The Windows build is a **single self-contained `.exe`** — it bundles Python, all
+The Windows build is a **self-contained app folder** — it bundles Python, all
 libraries, and the OCR tools (Tesseract + Ghostscript). The recipient needs
-nothing installed.
+nothing installed. It ships as a `.zip` (one folder holding the `.exe` plus an
+`_internal/` folder of bundled files).
 
-To share: download the `.exe` from the GitHub Release and send it over
-**Teams** (email servers block `.exe` attachments). They:
+To share: download `DMP-WS-Door-Chart-Generator-Windows.zip` from the GitHub
+Release and send it over **Teams** (email servers block executables). They:
 
-1. Save the `.exe` anywhere (Desktop, etc.).
-2. Double-click it.
-3. On first run of a version, Windows SmartScreen shows "Windows protected your
-   PC" — click **More info → Run anyway**. This is expected for an unsigned
-   build; it is one click, not an install.
+1. Save the `.zip` and **extract it** (right-click → Extract All). Keep the
+   `.exe` and the `_internal/` folder together — the app needs both.
+2. Open the extracted folder and double-click the `.exe`.
+3. If Windows SmartScreen shows "Windows protected your PC", click
+   **More info → Run anyway** (one click, not an install). Code-signed
+   releases (see below) do not show this.
 
 They never touch GitHub or the source code.
+
+The build is deliberately **one-folder** (not one-file) and **UPX-free** so it
+is not blocked by AppLocker `%TEMP%` rules or flagged as a false positive by
+antivirus on managed/corporate Windows machines.
+
+## Code signing (Windows — optional, recommended for wide sharing)
+
+Released Windows builds are code-signed automatically **if** Azure Trusted
+Signing secrets are configured on the repo. A signed `.exe` has a verified
+publisher, which clears SmartScreen's "unknown publisher" warning and stops
+antivirus/EDR from flagging it on managed machines.
+
+One-time setup:
+
+1. Create an **Azure Trusted Signing** account (~$10/month), add a certificate
+   profile, and complete the one-time identity validation.
+2. Create an Azure AD app registration with access to the signing account.
+3. Add these repository secrets (Settings → Secrets and variables → Actions):
+   - `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
+   - `AZURE_TS_ENDPOINT` — e.g. `https://eus.codesigning.azure.net`
+   - `AZURE_TS_ACCOUNT` — Trusted Signing account name
+   - `AZURE_TS_PROFILE` — certificate profile name
+
+`release.yml` signs the `.exe` only when these secrets exist; without them the
+build still succeeds and produces an unsigned `.zip`.
 
 ## Output location
 

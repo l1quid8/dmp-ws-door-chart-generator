@@ -163,26 +163,36 @@ if IS_MAC:
         },
     )
 else:
-    # Windows: single-file portable .exe
+    # Windows: one-folder build — a folder containing the .exe plus _internal/.
+    # One-folder (not one-file) so the app does NOT unpack itself into %TEMP%
+    # at launch; corporate AppLocker policies commonly block execution from
+    # %TEMP%. UPX is disabled because UPX-packed binaries are a frequent
+    # antivirus false-positive trigger. Both changes make the build far less
+    # likely to be blocked on managed/corporate Windows machines.
     exe = EXE(
         pyz,
         a.scripts,
-        a.binaries,
-        a.zipfiles,
-        a.datas,
         [],
+        exclude_binaries=True,
         name=APP_NAME,
         icon=ICON_ICO,
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
-        upx=True,
-        upx_exclude=[],
-        runtime_tmpdir=None,
+        upx=False,
         console=False,
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,
         codesign_identity=None,
         entitlements_file=None,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=False,
+        name=APP_NAME,
     )
