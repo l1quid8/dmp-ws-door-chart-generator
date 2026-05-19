@@ -763,10 +763,10 @@ class App:
         the CAD prints disagree on, apply the choices, then re-enter on_resolved."""
         conflicts = list(design.conflicts)
 
-        win = ctk.CTkToplevel(self)
+        win = ctk.CTkToplevel(self.root)
         win.title("Review source-data inconsistencies")
         win.geometry("600x520")
-        win.transient(self)
+        win.transient(self.root)
         win.grab_set()
         win.protocol("WM_DELETE_WINDOW", lambda: None)  # force an explicit choice
 
@@ -825,10 +825,10 @@ class App:
         rsp_names = [f"RSP {r.number}" for r in design.rsps]
         kp_names = [f"KEYPAD #{k.number}" for k in design.keypads if k.number != 1]
 
-        win = ctk.CTkToplevel(self)
+        win = ctk.CTkToplevel(self.root)
         win.title("Confirm splitter wiring")
         win.geometry("640x600")
-        win.transient(self)
+        win.transient(self.root)
         win.grab_set()
         win.protocol("WM_DELETE_WINDOW", lambda: None)
 
