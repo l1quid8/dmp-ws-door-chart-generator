@@ -535,27 +535,293 @@ def reconstruct_edges(segments: list[tuple[tuple[float, float], tuple[float, flo
     return edges
 
 
-def extract_full_topology(pdf_path: Path, page_idx: int = 10) -> tuple[list[Device], list[Edge]]:
-    """Full Phase 1+2+3 pipeline: extract devices and edges from a riser-diagram page.
+# ===================================================================
+# Rebuilt riser topology reconstruction — graph-component based.
+#
+# The original build_polylines/reconstruct_edges linearized each connected
+# wire network into a single 2-endpoint path and matched devices only at those
+# two extreme endpoints — so every mid-network bus tap was silently lost (it
+# found 4-7 of ~15-20 real edges). This version keeps the full connected
+# component and emits an edge for every pair of device footprints the component
+# touches, with direction assigned by BFS distance outward from the MSP.
+# ===================================================================
 
-    Args:
-        pdf_path: path to PDF
-        page_idx: 0-indexed page number (default 10 = page 11)
+def _point_segment_distance(p, a, b) -> float:
+    """Shortest distance from point p to segment ab."""
+    px, py = p
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    if L2 == 0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
-    Returns:
-        (devices, edges) tuple. Gracefully degrades: if Phase 3 fails, returns Phase 2 devices with empty edges.
+
+def _segment_components(segments: list, min_len: float = 8.0,
+                        tol: float = 6.0) -> list[list]:
+    """Group wire segments into junction-aware connected components.
+
+    Two segments share a component when an endpoint of one lies within `tol`
+    of the other segment — this catches the T-junctions a bus line makes (a
+    drop wire taps the *middle* of the bus, not its endpoint). Tiny segments
+    below `min_len` (curve-flattening noise from device-icon graphics) are
+    dropped first so the pairwise scan stays cheap. Returns a list of segment
+    lists.
     """
-    # Phase 1+2: extract text and cluster devices
+    segs = [s for s in segments
+            if math.hypot(s[1][0] - s[0][0], s[1][1] - s[0][1]) >= min_len]
+    n = len(segs)
+    if n == 0:
+        return []
+    bboxes = [(min(s[0][0], s[1][0]), min(s[0][1], s[1][1]),
+               max(s[0][0], s[1][0]), max(s[0][1], s[1][1])) for s in segs]
+    uf = UnionFind(n)
+    for i in range(n):
+        a1, a2 = segs[i]
+        bi = bboxes[i]
+        for j in range(i + 1, n):
+            bj = bboxes[j]
+            if (bi[0] - tol > bj[2] or bi[2] + tol < bj[0] or
+                    bi[1] - tol > bj[3] or bi[3] + tol < bj[1]):
+                continue
+            b1, b2 = segs[j]
+            if (_point_segment_distance(a1, b1, b2) < tol or
+                    _point_segment_distance(a2, b1, b2) < tol or
+                    _point_segment_distance(b1, a1, a2) < tol or
+                    _point_segment_distance(b2, a1, a2) < tol):
+                uf.union(i, j)
+    groups: dict[int, list] = {}
+    for i in range(n):
+        groups.setdefault(uf.find(i), []).append(segs[i])
+    return list(groups.values())
+
+
+def _split_at_junctions(segs: list, tol: float = 6.0) -> list:
+    """Split each segment wherever another segment's endpoint taps its interior,
+    so T-junctions become shared graph nodes."""
+    endpoints = []
+    for s in segs:
+        endpoints.append(s[0])
+        endpoints.append(s[1])
+    out = []
+    for a, b in segs:
+        ax, ay = a
+        bx, by = b
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        breaks = {0.0, 1.0}
+        if L2 > 0:
+            for p in endpoints:
+                t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / L2
+                if 0.02 < t < 0.98 and math.hypot(
+                        p[0] - (ax + t * dx), p[1] - (ay + t * dy)) < tol:
+                    breaks.add(round(t, 4))
+        ts = sorted(breaks)
+        for k in range(len(ts) - 1):
+            t0, t1 = ts[k], ts[k + 1]
+            out.append(((ax + t0 * dx, ay + t0 * dy),
+                        (ax + t1 * dx, ay + t1 * dy)))
+    return out
+
+
+def _build_wire_graph(segs: list, snap: float = 4.0):
+    """Weighted node graph from segments. Returns (nodes, adj)."""
+    node_id: dict = {}
+    nodes: list = []
+
+    def nid(p):
+        key = (round(p[0] / snap) * snap, round(p[1] / snap) * snap)
+        if key not in node_id:
+            node_id[key] = len(nodes)
+            nodes.append(key)
+        return node_id[key]
+
+    adj: dict = {}
+    for p1, p2 in segs:
+        i, j = nid(p1), nid(p2)
+        if i == j:
+            continue
+        w = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        adj.setdefault(i, []).append((j, w))
+        adj.setdefault(j, []).append((i, w))
+    return nodes, adj
+
+
+def _dijkstra(adj: dict, sources: list) -> dict:
+    """Shortest-path distances from any of `sources` to all reachable nodes."""
+    import heapq
+    dist = {s: 0.0 for s in sources}
+    pq = [(0.0, s) for s in sources]
+    heapq.heapify(pq)
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist.get(u, 1e18):
+            continue
+        for v, w in adj.get(u, []):
+            nd = d + w
+            if nd < dist.get(v, 1e18):
+                dist[v] = nd
+                heapq.heappush(pq, (nd, v))
+    return dist
+
+
+def _riser_rectangles(pdf_path: Path, page_idx: int) -> list[tuple[float, float, float, float]]:
+    """Drawn rectangles on the page — device boxes (MSP, RSP) are drawn as
+    rectangle primitives, not as line segments."""
+    doc = fitz.open(str(pdf_path))
+    page = doc[page_idx]
+    rects = []
+    for dr in page.get_drawings():
+        r = dr.get("rect")
+        if r is None:
+            continue
+        if 40 < r.width < 720 and 25 < r.height < 540:
+            rects.append((r.x0, r.y0, r.x1, r.y1))
+    doc.close()
+    return rects
+
+
+def compute_device_footprints(devices: list[Device], segments: list,
+                               pdf_path: Path, page_idx: int):
+    """Connection footprint (x0, y0, x1, y1) per device id.
+
+    RSP/MSP are drawn rectangles — use the rectangle that contains the anchor.
+    Keypads and top-of-bus splitters have no plain rectangle; use the nearest
+    compact segment cluster (their drawn icon/symbol), falling back to an
+    anchor-padded box. Also returns {splitter_id: rsp_id} for splitters drawn
+    on top of an RSP box (the "chained at that RSP" convention).
+    """
+    rects = _riser_rectangles(pdf_path, page_idx)
+
+    footprints: dict[str, tuple] = {}
+    rect_of: dict[str, tuple] = {}
+    for d in devices:
+        cx, cy = d.anchor.cx, d.anchor.cy
+        hits = [r for r in rects if r[0] - 6 <= cx <= r[2] + 6 and r[1] - 6 <= cy <= r[3] + 6]
+        if hits:
+            # RSP / MSP are drawn rectangles — the box IS the connection footprint.
+            r = min(hits, key=lambda r: (r[2] - r[0]) * (r[3] - r[1]))
+            footprints[d.id] = r
+            rect_of[d.id] = r
+        elif d.kind == "SPLITTER":
+            # Top-of-bus splitter symbols have no plain rectangle; wires tap within
+            # ~40pt of the anchor. Keep the box tight so stacked splitters (~100pt
+            # apart) don't overlap.
+            footprints[d.id] = (cx - 58, cy - 44, cx + 58, cy + 44)
+        else:
+            # Keypads / service KP: the drawn icon sits below and to the LEFT of
+            # the text anchor; the wire taps the icon ~80pt down-left. Bias the
+            # box left and down (and keep it under the ~150pt keypad spacing).
+            footprints[d.id] = (cx - 110, cy - 30, cx + 40, cy + 100)
+
+    # splitters whose anchor sits inside an RSP rectangle are drawn on that RSP
+    splitter_on_rsp: dict[str, str] = {}
+    for d in devices:
+        if d.kind != "SPLITTER" or d.id not in rect_of:
+            continue
+        for r in devices:
+            if r.kind == "RSP" and rect_of.get(r.id) == rect_of[d.id]:
+                splitter_on_rsp[d.id] = r.id
+    return footprints, splitter_on_rsp
+
+
+def reconstruct_edges(segments: list, devices: list[Device], spans: list[TextSpan],
+                      footprints: dict | None = None,
+                      pdf_path: Path | None = None,
+                      page_idx: int | None = None) -> list[Edge]:
+    """Reconstruct device-to-device connections from riser vector lines.
+
+    Segments are grouped into junction-aware components; within each component
+    a weighted wire graph is built and every leaf device (RSP/keypad) is
+    assigned to the splitter it is closest to *along the wires*, while each
+    splitter's feed is the upstream device (MSP or splitter) nearest it by wire
+    distance. This disambiguates a shared bus that bare connectivity cannot.
+    """
+    if footprints is None:
+        footprints, _ = compute_device_footprints(devices, segments, pdf_path, page_idx)
+    by_id = {d.id: d for d in devices}
+    INF = 1e18
+
+    raw_edges: list[tuple[str, str]] = []
+    for comp_segs in _segment_components(segments):
+        split = _split_at_junctions(comp_segs)
+        nodes, adj = _build_wire_graph(split)
+
+        # device -> graph-node indices that fall inside its footprint
+        dev_nodes: dict[str, list[int]] = {}
+        for d in devices:
+            fp = footprints[d.id]
+            m = 6.0  # margin: tolerate grid-snap rounding at box edges
+            ns = [i for i, (x, y) in enumerate(nodes)
+                  if fp[0] - m <= x <= fp[2] + m and fp[1] - m <= y <= fp[3] + m]
+            if ns:
+                dev_nodes[d.id] = ns
+        present = list(dev_nodes)
+        if len(present) < 2:
+            continue
+
+        dmap = {a: _dijkstra(adj, dev_nodes[a]) for a in present}
+
+        def wdist(a: str, b: str) -> float:
+            return min((dmap[a].get(n, INF) for n in dev_nodes[b]), default=INF)
+
+        splitters = [i for i in present if by_id[i].kind == "SPLITTER"]
+        msp = next((i for i in present if by_id[i].kind == "MSP"), None)
+        leaves = [i for i in present if by_id[i].kind in ("RSP", "KEYPAD")]
+
+        # MSP-distance ranks how far "downstream" each device is
+        msp_d: dict[str, float] = {}
+        if msp is not None:
+            for i in present:
+                msp_d[i] = wdist(msp, i)
+
+        # each leaf -> the splitter nearest it along the wires
+        for lf in leaves:
+            if not splitters:
+                continue
+            best = min(splitters, key=lambda s: wdist(s, lf))
+            if wdist(best, lf) < INF:
+                raw_edges.append((best, lf))
+
+        # each splitter's feed -> nearest upstream device (smaller MSP distance)
+        ordered = sorted(splitters, key=lambda s: msp_d.get(s, INF))
+        for k, s in enumerate(ordered):
+            upstream = ([msp] if msp is not None else []) + ordered[:k]
+            upstream = [u for u in upstream if u is not None]
+            if not upstream:
+                continue
+            feed = min(upstream, key=lambda u: wdist(u, s))
+            if wdist(feed, s) < INF:
+                raw_edges.append((feed, s))
+
+    edges: list[Edge] = []
+    seen: set = set()
+    for src, dst in raw_edges:
+        if src == dst or (src, dst) in seen:
+            continue
+        seen.add((src, dst))
+        edges.append(Edge(src=by_id[src], dst=by_id[dst], cable=None))
+    return edges
+
+
+def extract_full_topology(pdf_path: Path, page_idx: int = 10) -> tuple[list[Device], list[Edge]]:
+    """Full pipeline: extract devices and edges from a riser-diagram page.
+
+    Returns (devices, edges). Gracefully degrades: if edge detection fails,
+    returns the devices with an empty edge list.
+    """
     spans = extract_spans(pdf_path, page_idx)
     spans = merge_multiline_locations(spans)
     devices = cluster_devices(spans)
 
-    # Phase 3: edge detection
     try:
         segments = extract_line_segments(pdf_path, page_idx)
-        edges = reconstruct_edges(segments, devices, spans)
+        footprints, _ = compute_device_footprints(devices, segments, pdf_path, page_idx)
+        edges = reconstruct_edges(segments, devices, spans, footprints=footprints)
     except Exception as e:
-        print(f"Warning: Phase 3 edge detection failed: {e}")
+        print(f"Warning: edge detection failed: {e}")
         edges = []
 
     return devices, edges

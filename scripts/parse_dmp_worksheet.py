@@ -105,6 +105,8 @@ class DMPDesign:
     power_supplies: list[PowerSupply] = field(default_factory=list)
     zones: list[ZoneInfo] = field(default_factory=list)
     master_zones: list[Zone] = field(default_factory=list)   # NEW: from Master sheet
+    conflicts: list = field(default_factory=list)            # unresolved source-data conflicts
+    topology_source: str = ""                                # "riser" | "auto-derived"
 
 
 # -------- parsing helpers --------

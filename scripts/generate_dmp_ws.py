@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -141,7 +142,13 @@ def _apply_phase3_topology(design, edges, phase3_devices) -> int:
 
     # Apply to DMP splitters
     for splitter in design.splitters:
-        outs = outputs_by_src.get(splitter.id, [])
+        outs = list(dict.fromkeys(outputs_by_src.get(splitter.id, [])))  # dedupe, keep order
+        # A splitter has only 3 outputs. If extraction over-subscribed it, keep
+        # the structural outputs (chain links to other splitters, RSP feeds) and
+        # let excess keypads drop — keypad distribution is the least certain part
+        # of extraction and is corrected in the review step.
+        if len(outs) > 3:
+            outs.sort(key=lambda o: 0 if str(o).startswith(("To ", "RSP ")) else 1)
         # Pad to 3 outputs with "Spare" (DMP convention)
         while len(outs) < 3:
             outs.append("Spare")
@@ -166,6 +173,23 @@ def _apply_phase3_topology(design, edges, phase3_devices) -> int:
                 splitter.inputs = {"KP-Bus In": "KEYPAD BUS IN FROM XR/550"}
 
     return n_applied
+
+
+def _phase3_topology_complete(design: DMPDesign) -> bool:
+    """True if riser-extracted splitter I/O covers every RSP and every
+    non-service keypad as a splitter output — i.e. it can be trusted over the
+    auto-derive convention. If anything is missing, the convention is used."""
+    produced: set[str] = set()
+    for s in design.splitters:
+        for o in (s.outputs or []):
+            produced.add(str(o).strip())
+    for rsp in design.rsps:
+        if f"RSP {rsp.number}" not in produced:
+            return False
+    for kp in design.keypads:
+        if kp.number != 1 and f"KEYPAD #{kp.number}" not in produced:
+            return False
+    return True
 
 
 def _detect_riser_page(pdf_path: Path) -> int:
@@ -213,8 +237,9 @@ def _auto_derive_splitter_io(design) -> None:
     LX chain convention (using IA-diagram IDs):
       710-LX500-1: in='500 BUS IN FROM XR/550'; outputs=['RSP 1', 'To 710-LX500-N', ...] padded with 'Spare'
       710-LX500-N (N>=2): in='From 710-LX500-1'; outputs = remaining RSPs round-robin, padded
-    KP convention:
-      710-KP-1: in='KEYPAD BUS IN FROM XR/550'; outputs=['KEYPAD #N' for non-service kps], padded
+    KP convention (chained, mirrors LX):
+      710-KP-1: in='KEYPAD BUS IN FROM XR/550'; outputs=keypads + 'To 710-KP-N' links, padded
+      710-KP-N (N>=2): in='From 710-KP-1'; outputs = remaining keypads round-robin, padded
     """
     lx = [s for s in design.splitters if s.splitter_type == "LX"]
     kp = [s for s in design.splitters if s.splitter_type == "KP"]
@@ -250,25 +275,43 @@ def _auto_derive_splitter_io(design) -> None:
                   f"{len(rsps) - capacity} RSP(s) not assigned to a splitter output.")
 
     if kp:
-        # KP splitters are typically all fed in parallel from the MSP (unlike LX
-        # which chains LX-2/LX-3 from LX-1). Set every KP's input to the canonical
-        # top-of-bus string.
-        for s in kp:
-            s.inputs = {"KP-Bus In": "KEYPAD BUS IN FROM XR/550"}
-
-        # Distribute non-service keypads round-robin across KP splitters so multiple
-        # KP splitters all get used (matches typical layouts where keypads are split
-        # by building proximity to each KP). With 4 non-service keypads + 2 KP
-        # splitters this gives 2+2; with 3 keypads + 1 splitter all go on KP-1.
+        # KP splitters daisy-chain off kp[0] exactly like the LX bus above —
+        # kp[0] is fed from the XR/550, every downstream KP splitter is fed
+        # "From 710-KP-1". (Earlier code parallelized them off the MSP, which
+        # produced wrong wiring on real designs — KP buses chain like LX buses.)
         non_service = [k for k in design.keypads if k.number != 1]
-        kp_buckets: dict[str, list[str]] = {s.id: [] for s in kp}
-        for i, k in enumerate(non_service):
-            kp_buckets[kp[i % len(kp)].id].append(f"KEYPAD #{k.number}")
-        for s in kp:
+        downstream = kp[1:]
+
+        # kp[0]: keypads fill the slots not needed for chain links, then one
+        # "To 710-KP-N" link per downstream splitter, padded with "Spare".
+        kp[0].inputs = {"KP-Bus In": "KEYPAD BUS IN FROM XR/550"}
+        kp0_keypad_slots = max(0, 3 - len(downstream))
+        outs = [f"KEYPAD #{k.number}" for k in non_service[:kp0_keypad_slots]]
+        for chained in downstream:
+            outs.append(f"To {chained.id}")
+        while len(outs) < 3:
+            outs.append("Spare")
+        kp[0].outputs = outs[:3]
+
+        # Downstream KP splitters chain from kp[0] and carry the remaining keypads.
+        kp_buckets: dict[str, list[str]] = {s.id: [] for s in downstream}
+        for i, k in enumerate(non_service[kp0_keypad_slots:]):
+            if not downstream:
+                break
+            kp_buckets[downstream[i % len(downstream)].id].append(f"KEYPAD #{k.number}")
+        for s in downstream:
+            s.inputs = {"KP-Bus In": f"From {kp[0].id}"}
             outs = kp_buckets[s.id]
             while len(outs) < 3:
                 outs.append("Spare")
             s.outputs = outs[:3]
+
+        # Warn if keypads exceed the chained capacity (kp[0] slots + 3 per downstream).
+        capacity = kp0_keypad_slots + 3 * len(downstream)
+        if len(non_service) > capacity:
+            print(f"  WARNING: {len(non_service)} non-service keypads but KP-bus capacity "
+                  f"is {capacity} — {len(non_service) - capacity} keypad(s) not assigned to a "
+                  f"splitter output.")
 
 
 from paths import resource_path, output_dir
@@ -326,6 +369,92 @@ def ensure_searchable_pdf(pdf_path: Path, searchable_override: Optional[Path] = 
         )
 
 
+# --- Source-data conflict detection -----------------------------------------
+#
+# An RSP's room is printed in two independent places on the CAD design: the
+# COMBUS LINES table (the service-panel row) and the zone schedule (the RSP's
+# A/C-loss and battery-trouble supervisory zones, which monitor that RSP's own
+# power supply and are therefore in the same room as the RSP). When the CAD team
+# mistypes one — e.g. RSP3 listed as "CLASSROOM 17" in COMBUS LINES but its
+# supervisory zones say "ROOM 18" — the generator should not silently pick one.
+# It collects the mismatch and escalates it to the user (CLI prompt / GUI dialog).
+
+@dataclass
+class LocationConflict:
+    """A device location parsed inconsistently from two independent PDF sources."""
+    kind: str           # "RSP" | "KEYPAD"
+    number: int
+    label: str          # human-readable, e.g. "RSP 3 location"
+    options: list       # list[tuple[value: str, source: str]]
+
+
+_NUM_TOKEN_RE = re.compile(r"\d+")
+_FLOOR_NUM_RE = re.compile(r"\d+\s*(?:st|nd|rd|th)\b|\d+\s*(?:st|nd|rd|th)?\s*(?:flr|floor)\b", re.I)
+
+
+def _significant_numbers(loc: str) -> set:
+    """Numeric tokens in a location string, excluding floor ordinals
+    ('1ST FLR', '2nd floor', ...). A room-number typo shows up here."""
+    if not loc:
+        return set()
+    return set(_NUM_TOKEN_RE.findall(_FLOOR_NUM_RE.sub(" ", str(loc))))
+
+
+def detect_location_conflicts(design: DMPDesign, parsed) -> list:
+    """Cross-check each RSP's service-panel location (COMBUS LINES table) against
+    the location of its supervisory zones (the A/C-loss / battery-trouble zones,
+    which are co-located with the RSP). Flags a conflict when the room NUMBER
+    disagrees — the CAD-typo class a technician has to fix by hand. Identical
+    locations and wording-only differences are not escalated. `parsed` is the
+    ParsedSchedule from parse_searchable_pdf. Returns a list of LocationConflict.
+    """
+    # Full supervisory-zone location per RSP number, from the zone schedule.
+    sup_by_rsp: dict[int, str] = {}
+    for z in getattr(parsed, "zones", None) or []:
+        if not (z.is_ps_ac or z.is_ps_batt) or not z.room:
+            continue
+        loc = " ".join(p for p in (z.building, z.floor, z.room) if p).strip()
+        if loc:
+            sup_by_rsp.setdefault(z.rsp, loc)
+
+    conflicts: list = []
+    for rsp in design.rsps:
+        combus_loc = rsp.location
+        sup_loc = sup_by_rsp.get(rsp.number)
+        if not combus_loc or not sup_loc:
+            continue
+        if _norm_loc(combus_loc) == _norm_loc(sup_loc):
+            continue  # agree
+        combus_nums = _significant_numbers(combus_loc)
+        sup_nums = _significant_numbers(sup_loc)
+        if not combus_nums or not sup_nums or combus_nums == sup_nums:
+            continue  # need a real room-number disagreement (not missing/wording)
+        conflicts.append(LocationConflict(
+            kind="RSP", number=rsp.number,
+            label=f"RSP {rsp.number} location",
+            options=[(combus_loc, "COMBUS LINES table"),
+                     (sup_loc, "supervisory zones (A/C-loss & battery)")],
+        ))
+
+    return conflicts
+
+
+def apply_location_conflict(design: DMPDesign, conflict: LocationConflict, value: str) -> None:
+    """Write the user-chosen location onto every design object that shares the
+    conflicted device number (RSP also updates its matching power supply)."""
+    if conflict.kind == "RSP":
+        for rsp in design.rsps:
+            if rsp.number == conflict.number:
+                rsp.location = value
+        for ps in design.power_supplies:
+            if ps.number == conflict.number:
+                ps.location = value
+    elif conflict.kind == "KEYPAD":
+        for kp in design.keypads:
+            if kp.number == conflict.number:
+                kp.location = value
+
+
 def build_dmp_design_from_pdf(
     searchable_pdf: Path,
     design_pdf: Path,
@@ -347,6 +476,8 @@ def build_dmp_design_from_pdf(
     # the page by finding the one with the most splitter/RSP/keypad device anchors —
     # the page index varies per design (INT-5.0 may be page 6, 7, 10, etc.).
     devices = []
+    riser_edges: list = []
+    splitter_on_rsp: dict = {}
     riser_page = _detect_riser_page(design_pdf)
     try:
         from extract_topology import merge_multiline_locations, merge_horizontal_locations
@@ -357,6 +488,19 @@ def build_dmp_design_from_pdf(
         print(f"  Devices from topology (page {riser_page}): {len(devices)}")
     except Exception as e:
         print(f"  Warning: could not extract topology from page {riser_page}: {e}")
+
+    # Reconstruct the splitter/keypad wiring from the riser-diagram vector lines.
+    if devices:
+        try:
+            from extract_topology import (extract_line_segments,
+                compute_device_footprints, reconstruct_edges)
+            segments = extract_line_segments(design_pdf, riser_page)
+            footprints, splitter_on_rsp = compute_device_footprints(
+                devices, segments, design_pdf, riser_page)
+            riser_edges = reconstruct_edges(segments, devices, spans, footprints=footprints)
+            print(f"  Riser edges extracted: {len(riser_edges)}")
+        except Exception as e:
+            print(f"  Warning: riser edge extraction failed: {e}")
 
     # Build DMPDesign structure
     design = DMPDesign()
@@ -474,14 +618,29 @@ def build_dmp_design_from_pdf(
             outputs=[],
         ))
 
-    # Splitter I/O: auto-derive the canonical chain (lx[0] = top of bus, others
-    # downstream). Phase 3 vector-line detection was tried but proved unreliable —
-    # it picked up partial edges and inferred chain direction backwards on real
-    # designs (e.g. Academy LX500-1 ↔ LX500-2). Stick with the deterministic
-    # convention from auto-derive.
+    # Splitter locations: a splitter drawn on an RSP box is in that RSP's room.
+    # This corrects the often-truncated location pulled from the riser label.
+    if splitter_on_rsp:
+        rsp_loc = {r.number: r.location for r in design.rsps}
+        for s in design.splitters:
+            rsp_id = splitter_on_rsp.get(s.id)
+            if rsp_id:
+                m = re.search(r"\d+", rsp_id)
+                if m and int(m.group()) in rsp_loc and rsp_loc[int(m.group())]:
+                    s.location = rsp_loc[int(m.group())]
+
+    # Splitter I/O: prefer the wiring reconstructed from the riser diagram; fall
+    # back to the deterministic auto-derive convention when riser extraction
+    # didn't cover the whole design.
     if design.splitters:
-        _auto_derive_splitter_io(design)
-        print(f"  Auto-derived splitter I/O for {len(design.splitters)} splitters")
+        applied = _apply_phase3_topology(design, riser_edges, devices) if riser_edges else 0
+        if applied and _phase3_topology_complete(design):
+            design.topology_source = "riser"
+            print(f"  Splitter I/O from riser extraction ({applied} edges applied)")
+        else:
+            _auto_derive_splitter_io(design)
+            design.topology_source = "auto-derived"
+            print(f"  Auto-derived splitter I/O for {len(design.splitters)} splitters")
 
     # Zones: create ZoneInfo for each zone in the schedule
     for zone in parsed.zones:
@@ -495,8 +654,36 @@ def build_dmp_design_from_pdf(
             partition=1,
         ))
 
+    # Cross-check locations parsed from independent PDF sources and surface any
+    # mismatches. In a GUI run (non_interactive) the conflicts stay on the design
+    # so the app can show a resolution dialog before generation.
+    design.conflicts = detect_location_conflicts(design, parsed)
+    if design.conflicts and non_interactive:
+        for c in design.conflicts:
+            print("  CONFLICT (needs review): " + c.label + " — " +
+                  " vs ".join(f"{v!r} [{src}]" for v, src in c.options))
+
     # Interactive prompts for gaps (unless --non-interactive)
     if not non_interactive:
+        if design.conflicts:
+            print("\n=== Source-data inconsistencies (the CAD prints disagree) ===")
+            for c in list(design.conflicts):
+                print(f"\n{c.label}:")
+                for i, (value, source) in enumerate(c.options, 1):
+                    print(f"  {i}. {value}   [{source}]")
+                choice = input(
+                    f"  Choose 1-{len(c.options)}, or type the correct value: "
+                ).strip()
+                resolved: Optional[str] = None
+                if choice.isdigit() and 1 <= int(choice) <= len(c.options):
+                    resolved = c.options[int(choice) - 1][0]
+                elif choice:
+                    resolved = choice
+                if resolved is not None:
+                    apply_location_conflict(design, c, resolved)
+                    print(f"  -> using: {resolved}")
+            design.conflicts = []
+
         print("\n=== Metadata Gaps (press Enter to skip) ===")
 
         # School code — show auto-extracted value as the default
@@ -525,22 +712,29 @@ def build_dmp_design_from_pdf(
         if gateway:
             design.site_info.default_gateway = gateway
 
-        # Splitter I/O routing — opt-in via --prompt-routing.
-        # Auto-derive runs unconditionally above, so this is for overriding those defaults.
+        # Splitter I/O routing — opt-in via --prompt-routing. Shows the derived
+        # wiring (from the riser, or the convention) and lets the user correct
+        # each output; press Enter to keep the derived value.
         if prompt_routing and design.splitters:
-            print("\n=== Splitter I/O Routing (overrides auto-derived defaults) ===")
+            print(f"\n=== Splitter I/O Routing — derived from: "
+                  f"{design.topology_source or 'auto-derived'} ===")
             for splitter in design.splitters:
-                print(f"\n{splitter.id} (at {splitter.location})")
+                inp = list(splitter.inputs.values())[0] if splitter.inputs else ""
+                print(f"\n{splitter.id} (at {splitter.location})  input: {inp}")
                 rsp_names = [f"RSP {r.number}" for r in design.rsps]
-                kp_names = [f"KP {k.number}" for k in design.keypads]
+                kp_names = [f"KEYPAD #{k.number}" for k in design.keypads if k.number != 1]
                 splitter_names = [f"To {s.id}" for s in design.splitters if s.id != splitter.id]
                 choices = rsp_names + kp_names + splitter_names + ["Spare"]
-
-                for i in range(1, 4):
-                    prompt = f"  Output {i}? ({', '.join(choices)}) "
-                    choice = input(prompt).strip()
-                    if choice:
-                        splitter.outputs.append(choice)
+                print(f"  choices: {', '.join(choices)}")
+                outs = list(splitter.outputs or [])
+                for i in range(3):
+                    cur = outs[i] if i < len(outs) else "Spare"
+                    choice = input(f"  Output {i + 1} [{cur}]? ").strip()
+                    if i < len(outs):
+                        outs[i] = choice if choice else cur
+                    elif choice:
+                        outs.append(choice)
+                splitter.outputs = (outs + ["Spare", "Spare", "Spare"])[:3]
 
     return design
 
@@ -871,6 +1065,9 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path) ->
     _restore_master_sheet_header(template_path, output_path)
     _strip_calc_chain(output_path)
 
+    # Trim the template's 15 Point Info sheets down to one per RSP / 714-16 expander.
+    _remove_extra_point_info_sheets(output_path, keep_count=len(design.rsps))
+
 
 def _strip_calc_chain(output_path: Path) -> None:
     """Remove xl/calcChain.xml and all references to it. calcChain is a cached calculation
@@ -908,6 +1105,109 @@ def _strip_calc_chain(output_path: Path) -> None:
                     "",
                     text,
                 )
+                data = text.encode("utf-8")
+            zout.writestr(item, data)
+    shutil.move(tmp_path, output_path)
+
+
+def _remove_extra_point_info_sheets(output_path: Path, keep_count: int) -> None:
+    """Delete unused 'Point Info' sheets so the workbook keeps exactly `keep_count`
+    of them (one per RSP / 714-16 expander module).
+
+    The template ships 15 Point Info sheets; real designs use far fewer. They are
+    the LAST sheets in the workbook, so only trailing parts are removed — no rId
+    renumbering of earlier sheets is needed. Done as a post-process on the final
+    zip because _overlay_openpyxl_changes() rebuilds the output from a binary copy
+    of the template (which still contains all 15 Point Info sheets).
+    """
+    import re
+    import shutil
+    import zipfile
+    from tempfile import NamedTemporaryFile
+
+    if keep_count < 0:
+        keep_count = 0
+
+    with zipfile.ZipFile(output_path, "r") as zin:
+        workbook_xml = zin.read("xl/workbook.xml").decode("utf-8")
+        rels_xml = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+
+    # Collect the Point Info <sheet> entries, ordered by their trailing number.
+    point_info: list[tuple[int, str, str]] = []  # (number, sheet_tag, r:id)
+    for m in re.finditer(r"<sheet\b[^>]*?/>", workbook_xml):
+        tag = m.group(0)
+        name_m = re.search(r'name="([^"]*)"', tag)
+        if not name_m or "Point Info" not in name_m.group(1):
+            continue
+        num_m = re.search(r"Point Info\s*\(?\s*(\d+)", name_m.group(1))
+        rid_m = re.search(r'r:id="([^"]*)"', tag)
+        if num_m and rid_m:
+            point_info.append((int(num_m.group(1)), tag, rid_m.group(1)))
+    point_info.sort(key=lambda t: t[0])
+
+    to_delete = point_info[keep_count:]
+    if not to_delete:
+        return
+
+    del_tags = [tag for _, tag, _ in to_delete]
+    del_rids = {rid for _, _, rid in to_delete}
+
+    # Map each deleted r:id to its worksheet part via workbook.xml.rels.
+    del_parts: set[str] = set()
+    for rid in del_rids:
+        rel_m = re.search(
+            r'<Relationship\b[^>]*?\bId="' + re.escape(rid) + r'"[^>]*?/>', rels_xml
+        )
+        if not rel_m:
+            continue
+        target_m = re.search(r'Target="([^"]*)"', rel_m.group(0))
+        if not target_m:
+            continue
+        part = target_m.group(1).lstrip("/")
+        if not part.startswith("xl/"):
+            part = "xl/" + part
+        del_parts.add(part)
+
+    # Per-sheet _rels files for the deleted parts (xl/worksheets/_rels/sheetN.xml.rels).
+    del_rel_parts: set[str] = set()
+    for part in del_parts:
+        head, tail = part.rsplit("/", 1)
+        del_rel_parts.add(f"{head}/_rels/{tail}.rels")
+
+    # workbook.xml: drop the deleted <sheet> elements.
+    new_workbook = workbook_xml
+    for tag in del_tags:
+        new_workbook = new_workbook.replace(tag, "")
+
+    # workbook.xml.rels: drop the deleted <Relationship> elements.
+    new_rels = rels_xml
+    for rid in del_rids:
+        new_rels = re.sub(
+            r'<Relationship\b[^>]*?\bId="' + re.escape(rid) + r'"[^>]*?/>', "", new_rels
+        )
+
+    with NamedTemporaryFile(delete=False, suffix=".xlsx") as tmpf:
+        tmp_path = tmpf.name
+
+    with zipfile.ZipFile(output_path, "r") as zin, zipfile.ZipFile(
+        tmp_path, "w", zipfile.ZIP_DEFLATED
+    ) as zout:
+        for item in zin.namelist():
+            if item in del_parts or item in del_rel_parts:
+                continue  # drop deleted worksheet parts and their _rels
+            data = zin.read(item)
+            if item == "xl/workbook.xml":
+                data = new_workbook.encode("utf-8")
+            elif item == "xl/_rels/workbook.xml.rels":
+                data = new_rels.encode("utf-8")
+            elif item == "[Content_Types].xml":
+                text = data.decode("utf-8")
+                for part in del_parts:
+                    text = re.sub(
+                        r'<Override\b[^>]*?PartName="/' + re.escape(part) + r'"[^>]*?/>',
+                        "",
+                        text,
+                    )
                 data = text.encode("utf-8")
             zout.writestr(item, data)
     shutil.move(tmp_path, output_path)
