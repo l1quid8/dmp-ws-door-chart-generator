@@ -813,7 +813,7 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path,
         row = 13 + i
         if rsp.zones:
             zmin, zmax = min(rsp.zones), max(rsp.zones)
-            _write_cell_safe(ws, f"B{row}", f"714-16-{rsp.number}")
+            _write_cell_safe(ws, f"B{row}", f"{getattr(rsp, 'model', '') or '714-16'}-{rsp.number}")
             _write_cell_safe(ws, f"C{row}", f"{zmin}-{zmax}")
         _write_cell_safe(ws, f"D{row}", rsp.location)
 
@@ -830,7 +830,8 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path,
     row_start = 4
     for i, rsp in enumerate(design.rsps):
         row = row_start + i
-        _write_cell_safe(ws, f"A{row}", "DMP 714-16 #")
+        model = getattr(rsp, "model", "") or "714-16"
+        _write_cell_safe(ws, f"A{row}", f"DMP {model} #")
         _write_cell_safe(ws, f"B{row}", rsp.number)
         if rsp.zones:
             zone_min = min(rsp.zones)
@@ -1096,7 +1097,11 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path,
     _strip_calc_chain(output_path)
 
     # Trim the template's 15 Point Info sheets down to one per RSP / 714-16 expander.
-    _remove_extra_point_info_sheets(output_path, keep_count=len(design.rsps))
+    # Keep sheets up to the highest module number — Point Info sheet N is
+    # hard-wired to module N's Master row stride, so numbering gaps (a removed
+    # expander) must keep their (blank) sheet rather than shift later modules.
+    _remove_extra_point_info_sheets(
+        output_path, keep_count=max((r.number for r in design.rsps), default=0))
 
 
 def _strip_calc_chain(output_path: Path) -> None:

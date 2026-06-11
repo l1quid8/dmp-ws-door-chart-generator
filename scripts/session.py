@@ -118,6 +118,7 @@ def _rsp_from_dict(d: dict) -> RSP:
         number=d.get("number", 0),
         location=d.get("location"),
         zones=list(d.get("zones") or []),
+        model=d.get("model", "714-16"),
     )
 
 

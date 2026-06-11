@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import re
+
 import openpyxl
 
 
@@ -54,6 +56,7 @@ class RSP:
     number: int
     location: Optional[str] = None
     zones: list[int] = field(default_factory=list)
+    model: str = "714-16"          # expander model: "714-16" (16 pts) or "714-8" (8 pts)
 
 
 @dataclass
@@ -339,6 +342,8 @@ def _parse_rsps(ws) -> list[RSP]:
         prefix = str(row[0]).strip()
         if not prefix.startswith("DMP 714"):
             continue
+        model_match = re.search(r"714[\s-]*(\d+)", prefix)
+        model = f"714-{model_match.group(1)}" if model_match else "714-16"
 
         # Module number — col B (index 1)
         num_raw = row[1] if len(row) > 1 else None
@@ -365,7 +370,7 @@ def _parse_rsps(ws) -> list[RSP]:
         if len(row) > 3 and row[3]:
             location = str(row[3]).strip()
 
-        rsps.append(RSP(number=module_num, location=location, zones=zones))
+        rsps.append(RSP(number=module_num, location=location, zones=zones, model=model))
     return rsps
 
 
