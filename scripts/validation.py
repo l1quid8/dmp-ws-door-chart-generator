@@ -103,6 +103,44 @@ def _rule_rsp_hyphen(design: DMPDesign, ctx: dict) -> Iterator[Issue]:
         yield from check(z.location, TAB_ZONES, f"zone:{z.number}", f"Z{z.number}")
 
 
+def _rule_capacity(design: DMPDesign, ctx: dict) -> Iterator[Issue]:
+    # Belt-and-braces: adds are guarded at the source (hardware.py), but a
+    # session file could arrive over-cap.
+    from hardware import MAX_EXPANDERS, MAX_KEYPADS, MAX_SPLITTERS_PER_TYPE
+    if len(design.rsps) > MAX_EXPANDERS:
+        yield Issue(
+            code="capacity.exceeded", severity="error", tab=TAB_POWER, ref=None,
+            message=f"{len(design.rsps)} expanders — the worksheet template "
+                    f"supports at most {MAX_EXPANDERS}",
+        )
+    for stype in ("LX", "KP"):
+        n = sum(1 for s in design.splitters if s.splitter_type == stype)
+        if n > MAX_SPLITTERS_PER_TYPE:
+            yield Issue(
+                code="capacity.exceeded", severity="error", tab=TAB_SPLITTERS,
+                ref=None,
+                message=f"{n} {stype} splitters — the splitter sheet fits at "
+                        f"most {MAX_SPLITTERS_PER_TYPE}",
+            )
+    if len(design.keypads) > MAX_KEYPADS:
+        yield Issue(
+            code="capacity.exceeded", severity="error", tab=TAB_KEYPADS, ref=None,
+            message=f"{len(design.keypads)} keypads — the keypad sheet fits at "
+                    f"most {MAX_KEYPADS}",
+        )
+
+
+def _rule_keypad_sources(design: DMPDesign, ctx: dict) -> Iterator[Issue]:
+    for kp in design.keypads:
+        if not (kp.source or "").strip():
+            yield Issue(
+                code="keypad.source_missing", severity="error", tab=TAB_KEYPADS,
+                ref=f"keypad:{kp.number}",
+                message=f"KEYPAD #{kp.number} has no source (its feed was "
+                        "removed or never set) — pick MSP or a splitter",
+            )
+
+
 def _rule_conflicts(design: DMPDesign, ctx: dict) -> Iterator[Issue]:
     for c in design.conflicts:
         kind_tab = TAB_SPLITTERS if getattr(c, "kind", "") == "RSP" else TAB_KEYPADS
@@ -132,6 +170,8 @@ RULES: list[Callable[[DMPDesign, dict], Iterator[Issue]]] = [
     _rule_site_required,
     _rule_zone_descriptions,
     _rule_rsp_hyphen,
+    _rule_capacity,
+    _rule_keypad_sources,
     _rule_conflicts,
     _rule_topology_confirmed,
 ]

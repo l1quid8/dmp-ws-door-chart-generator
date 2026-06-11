@@ -173,6 +173,51 @@ def test_confirmed_topology_silent():
     assert "topology.unconfirmed" not in _codes(issues)
 
 
+# -------- capacity.exceeded --------
+
+def test_over_capacity_errors():
+    from hardware import MAX_EXPANDERS, MAX_KEYPADS, MAX_SPLITTERS_PER_TYPE
+    from parse_dmp_worksheet import Keypad
+    design = _valid_design()
+    design.rsps = [RSP(number=n, location="X", zones=[501 + 16 * (n - 1)])
+                   for n in range(1, MAX_EXPANDERS + 2)]
+    design.splitters = [Splitter(id=f"710-LX500-{n}", splitter_type="LX",
+                                 outputs=["Spare"] * 3)
+                        for n in range(1, MAX_SPLITTERS_PER_TYPE + 2)]
+    design.keypads = [Keypad(number=n, source="MSP")
+                      for n in range(1, MAX_KEYPADS + 2)]
+    issues = validate_design(design, topology_confirmed=True)
+    caps = [i for i in issues if i.code == "capacity.exceeded"]
+    assert {i.tab for i in caps} == {"POWER", "SPLITTERS", "KEYPADS"}
+    assert not finalize_ok(issues)
+
+
+def test_within_capacity_silent():
+    issues = validate_design(_valid_design(), topology_confirmed=True)
+    assert "capacity.exceeded" not in _codes(issues)
+
+
+# -------- keypad.source_missing --------
+
+def test_sourceless_keypad_errors():
+    from parse_dmp_worksheet import Keypad
+    design = _valid_design()
+    design.keypads = [Keypad(number=1, source="MSP"),
+                      Keypad(number=2, source=None)]
+    issues = validate_design(design, topology_confirmed=True)
+    hits = [i for i in issues if i.code == "keypad.source_missing"]
+    assert len(hits) == 1 and hits[0].ref == "keypad:2"
+    assert hits[0].tab == "KEYPADS"
+
+
+def test_sourced_keypads_silent():
+    from parse_dmp_worksheet import Keypad
+    design = _valid_design()
+    design.keypads = [Keypad(number=1, source="MSP")]
+    issues = validate_design(design, topology_confirmed=True)
+    assert "keypad.source_missing" not in _codes(issues)
+
+
 # -------- aggregation --------
 
 def test_badge_counts_group_errors_by_tab():
