@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from paths import resource_path, output_dir
 from generate_dmp_ws import (
     build_dmp_design_from_pdf,
+    dmp_filename,
     write_dmp_xlsx,
     ensure_searchable_pdf,
     resolve_original_pdf,
@@ -823,6 +824,18 @@ class App:
                     title="Not a DMP worksheet",
                 )
                 return
+            if getattr(design, "dmp_status", "") == "DRAFT":
+                school = design.site_info.school_name or "this school"
+                self.state = "idle"
+                self.dmp_path = None
+                self._show_parse_error(
+                    ValueError(
+                        "This is a DRAFT export — drafts can't be re-imported. "
+                        f"Open the saved project for {school} instead."
+                    ),
+                    title="Draft worksheet refused",
+                )
+                return
             self.parsed_design = design
             self.state = "review_dmp"
             school = design.site_info.school_name or "Unknown"
@@ -1055,11 +1068,11 @@ class App:
             ensure_searchable_pdf(pdf_path)
             school_slug = _slugify(design.site_info.school_name or "output")
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_name = f"{school_slug}_dmp_{date.today().isoformat()}.xlsx"
+            out_name = dmp_filename(school_slug, stamp="FINAL")
             dmp_output = out_dir / out_name
             with contextlib.redirect_stdout(self._redirector), \
                  contextlib.redirect_stderr(self._redirector):
-                write_dmp_xlsx(design, DEFAULT_TEMPLATE, dmp_output)
+                write_dmp_xlsx(design, DEFAULT_TEMPLATE, dmp_output, stamp="FINAL")
             return dmp_output
 
         def on_done(result):

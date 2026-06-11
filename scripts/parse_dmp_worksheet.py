@@ -108,6 +108,7 @@ class DMPDesign:
     conflicts: list = field(default_factory=list)            # unresolved source-data conflicts
     topology_source: str = ""                                # "riser" | "auto-derived"
     master_zones_source: str = ""                            # "master" | "point_info"
+    dmp_status: str = ""                                     # "DRAFT" | "FINAL" | "" (DMPStatus doc prop)
 
 
 # -------- parsing helpers --------
@@ -132,6 +133,8 @@ def parse_dmp_worksheet(xlsx_path: str | Path) -> DMPDesign:
             design.site_info.address_line1 = prop.value
         elif prop.name == "SchoolAddressLine2":
             design.site_info.address_line2 = prop.value
+        elif prop.name == "DMPStatus":
+            design.dmp_status = prop.value or ""
 
     if "DMP XR550" in wb.sheetnames:
         design.site_info.xr550_location = _parse_xr550_location(wb["DMP XR550"])

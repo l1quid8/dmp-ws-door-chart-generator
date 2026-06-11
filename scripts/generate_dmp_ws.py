@@ -750,8 +750,27 @@ def _write_cell_safe(ws, cell_ref: str, value) -> None:
         pass
 
 
-def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path) -> None:
-    """Copy the blank template and populate all sheets with design data."""
+def dmp_filename(school_slug: str, stamp: str | None = None,
+                 date_str: str | None = None) -> str:
+    """Output filename for a generated DMP worksheet.
+
+    DRAFT/FINAL goes in the name so completion status is unambiguous when
+    techs browse the output folder.
+    """
+    from datetime import date as _date
+    d = date_str or _date.today().isoformat()
+    tag = f"_{stamp}" if stamp else ""
+    return f"{school_slug}_dmp{tag}_{d}.xlsx"
+
+
+def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path,
+                   stamp: str | None = None) -> None:
+    """Copy the blank template and populate all sheets with design data.
+
+    stamp: "DRAFT" adds a visible not-for-install banner and a machine-readable
+    DMPStatus doc property (drafts are refused on re-import — the session is
+    the source of truth); "FINAL" adds only the doc property.
+    """
     import shutil
     shutil.copy(template_path, output_path)
 
@@ -759,6 +778,12 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path) ->
 
     # SITE INFO sheet
     ws = wb["SITE INFO"]
+    if stamp == "DRAFT":
+        from datetime import date as _date
+        _write_cell_safe(
+            ws, "A1",
+            f"*** DRAFT — NOT FOR INSTALL ({_date.today().isoformat()}) ***",
+        )
     _write_cell_safe(ws, "B10", design.site_info.school_name)
     _write_cell_safe(ws, "B12", design.site_info.school_code)
     _write_cell_safe(ws, "B14", design.site_info.phone)
@@ -1035,6 +1060,10 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path) ->
         wb.custom_doc_props.append(
             StringProperty(name="SchoolAddressLine2", value=design.site_info.address_line2)
         )
+    if stamp:
+        # DRAFT exports are working copies of a session, never inputs; the
+        # app's import path refuses workbooks carrying DMPStatus=DRAFT.
+        wb.custom_doc_props.append(StringProperty(name="DMPStatus", value=stamp))
 
     # openpyxl strips files Excel needs (queryTables, connections, calcChain, sharedStrings,
     # printerSettings, table _rels, customXml, etc.) and reformats others (Content_Types,

@@ -183,6 +183,7 @@ def design_from_dict(d: dict) -> DMPDesign:
         conflicts=[_conflict_from_dict(x) for x in d.get("conflicts") or []],
         topology_source=d.get("topology_source", ""),
         master_zones_source=d.get("master_zones_source", ""),
+        dmp_status=d.get("dmp_status", ""),
     )
 
 
