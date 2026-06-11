@@ -101,6 +101,23 @@ def test_gap_reuse_after_removal():
     assert rsp.zones[0] == 517          # the freed Z517 block
 
 
+def test_bus_boundary_addressing():
+    """Bus 500 carries modules 1-6 (Z501-596); module 7 starts bus 600 at
+    Z601 (the template's Master skips Z597-600), module 13 starts bus 700."""
+    assert list(zone_block_for(6))[0] == 581
+    assert list(zone_block_for(7))[0] == 601
+    assert list(zone_block_for(12))[0] == 681
+    assert list(zone_block_for(13))[0] == 701
+    assert list(zone_block_for(15)) == list(range(733, 749))  # matches ACADEMY
+
+    d = _design_with_expanders(6)
+    rsp7 = add_expander(d, "714-8")
+    assert rsp7.zones == list(range(601, 609))
+    by_num = {z.number: z for z in d.zones}
+    assert by_num[607].location == "PS-7: A/C LOSS"
+    assert by_num[608].location == "PS-7: BATT. TRBL"
+
+
 # -------- remove_expander --------
 
 def test_remove_expander_drops_block_and_scrubs_outputs():
@@ -173,6 +190,31 @@ def test_remove_keypad_scrubs_outputs():
     remove_keypad(d, 3)
     assert d.keypads == []
     assert d.splitters[0].outputs == ["Spare", "Spare", "Spare"]
+
+
+def test_add_expander_materializes_zones_from_master():
+    """Designs parsed from an xlsx with uncached Point Info formulas carry
+    zone data only in master_zones; adding hardware must not let the next
+    master re-sync wipe it (regression: 48 DARBY rooms vanished)."""
+    from parse_dmp_worksheet import Zone
+    from session import sync_master_zones
+    d = DMPDesign(
+        rsps=[RSP(number=1, location="FACP", zones=list(range(501, 517)))],
+        power_supplies=[PowerSupply(number=1, location="FACP")],
+        master_zones=[
+            Zone(number=501, description="FACP ROOM", rsp_number=1),
+            Zone(number=502, description="LIBRARY", rsp_number=1),
+            Zone(number=515, description="PS-1: A/C LOSS", rsp_number=1, is_ps_ac=True),
+            Zone(number=516, description="PS-1: BATT. TRBL", rsp_number=1, is_ps_batt=True),
+        ],
+        master_zones_source="master",
+    )
+    assert d.zones == []
+    add_expander(d, "714-8")
+    sync_master_zones(d)
+    descs = {z.number: z.description for z in d.master_zones}
+    assert descs[501] == "FACP ROOM" and descs[502] == "LIBRARY"   # preserved
+    assert descs[523] == "PS-2: A/C LOSS"                          # new expander
 
 
 # -------- round-trips --------

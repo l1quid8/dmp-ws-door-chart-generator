@@ -32,6 +32,7 @@ EXPANDER_MODELS = {"714-16": 16, "714-8": 8}
 
 ZONE_BLOCK = 16
 ZONE_BASE = 501
+MODULES_PER_BUS = 6   # each LX bus carries 6 modules; zone hundreds encode the bus
 
 
 class HardwareError(Exception):
@@ -41,8 +42,14 @@ class HardwareError(Exception):
 # -------- expanders (RSP + paired PS + zone block) --------
 
 def zone_block_for(number: int) -> range:
-    """The 16-zone address block owned by expander module `number`."""
-    start = ZONE_BASE + ZONE_BLOCK * (number - 1)
+    """The 16-zone address block owned by expander module `number`.
+
+    DMP addressing is bus-based: bus 500 carries modules 1-6 (Z501-596),
+    bus 600 modules 7-12 (Z601-696), and so on — the Master template skips
+    Zx97-Zx00 at each bus boundary, so module 7 starts at Z601, not Z597.
+    """
+    bus, slot = divmod(number - 1, MODULES_PER_BUS)
+    start = ZONE_BASE + 100 * bus + ZONE_BLOCK * slot
     return range(start, start + ZONE_BLOCK)
 
 
@@ -57,6 +64,12 @@ def next_expander_number(design: DMPDesign) -> int:
 def add_expander(design: DMPDesign, model: str, location: str | None = None) -> RSP:
     if model not in EXPANDER_MODELS:
         raise HardwareError(f"Unknown expander model: {model}")
+    # A design parsed from an xlsx with uncached Point Info formulas carries
+    # its zone data only in master_zones. Materialize editable zones FIRST,
+    # or the next sync_master_zones would rebuild master from just the new
+    # expander's zones and wipe every existing description.
+    from session import ensure_editable_zones
+    ensure_editable_zones(design)
     if len(design.rsps) >= MAX_EXPANDERS:
         raise HardwareError(
             f"The worksheet template supports at most {MAX_EXPANDERS} expanders "
@@ -94,6 +107,8 @@ def remove_expander(design: DMPDesign, number: int) -> None:
     rsp = next((r for r in design.rsps if r.number == number), None)
     if rsp is None:
         raise HardwareError(f"No expander #{number} in this design.")
+    from session import ensure_editable_zones
+    ensure_editable_zones(design)  # same wipe guard as add_expander
     block = set(zone_block_for(number))
     design.rsps.remove(rsp)
     design.power_supplies = [p for p in design.power_supplies if p.number != number]

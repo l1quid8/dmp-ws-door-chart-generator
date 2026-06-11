@@ -22,7 +22,13 @@ import customtkinter as ctk
 from session import Session, save_session, sync_master_zones, write_recovery, clear_recovery
 from validation import validate_design, badge_counts
 from editor_zones import ZonesTab
-from editor_tabs import SplittersTab, KeypadsTab, PowerTab, auto_hide_scrollbar
+from editor_tabs import (
+    KeypadsTab,
+    PowerTab,
+    SplittersTab,
+    auto_hide_scrollbar,
+    prompt_add_expander,
+)
 
 ACCENT = "#4a7bb8"
 ACCENT_HOVER = "#3a6aa8"
@@ -146,13 +152,15 @@ class EditorFrame(ctk.CTkFrame):
         self._build_site_tab(self.tabs.tab("SITE"))
 
         self.zones = ZonesTab(self.tabs.tab("ZONES"), self.session.design,
-                              self._on_zones_edit)
+                              self._on_zones_edit,
+                              on_add_expander=self._add_expander_clicked)
         self.zones.grid(row=0, column=0, sticky="nsew")
 
         for title, cls, attr in [("SPLITTERS", SplittersTab, "splitters_tab"),
                                  ("KEYPADS", KeypadsTab, "keypads_tab"),
                                  ("POWER", PowerTab, "power_tab")]:
-            widget = cls(self.tabs.tab(title), self.session, self._on_design_edit)
+            widget = cls(self.tabs.tab(title), self.session, self._on_design_edit,
+                         on_structure_change=self._on_structure_change)
             widget.grid(row=0, column=0, sticky="nsew")
             setattr(self, attr, widget)
 
@@ -174,6 +182,23 @@ class EditorFrame(ctk.CTkFrame):
         sync_master_zones(self.session.design)
         self.mark_dirty()
         self.refresh_validation()
+
+    def _on_structure_change(self):
+        """Hardware was added or removed: every tab's choices and rows shift."""
+        sync_master_zones(self.session.design)
+        self.mark_dirty()
+        self.refresh_validation()
+        self.refresh_all_tabs()
+
+    def _add_expander_clicked(self):
+        prompt_add_expander(self.root, self.session, self._on_structure_change)
+
+    def refresh_all_tabs(self):
+        """Rebuild every tab from the (mutated) design lists."""
+        self.zones.refresh()
+        self.splitters_tab.refresh()
+        self.keypads_tab.refresh()
+        self.power_tab.refresh()
 
     # ------------------------------------------------------------------ #
     # Finalize gate                                                         #

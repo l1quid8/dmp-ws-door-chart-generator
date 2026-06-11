@@ -33,10 +33,11 @@ FILTERS = ["All", "Needs attention", "Spares", "Errors"]
 
 
 class ZonesTab(ctk.CTkFrame):
-    def __init__(self, master, design: DMPDesign, on_change):
+    def __init__(self, master, design: DMPDesign, on_change, on_add_expander=None):
         super().__init__(master, fg_color="transparent")
         self.design = design
         self.on_change = on_change  # called after any committed edit
+        self.on_add_expander = on_add_expander  # opens the add-expander dialog
         self._error_zones: set[int] = set()
         self._edit_widget: tk.Widget | None = None
         self._edit_item: str | None = None
@@ -72,6 +73,14 @@ class ZonesTab(ctk.CTkFrame):
         )
         self._filter_seg.set("All")
         self._filter_seg.grid(row=0, column=1)
+
+        if self.on_add_expander:
+            ctk.CTkButton(
+                bar, text="+ Add Expander", height=30, width=130,
+                fg_color="transparent", border_width=1, border_color=ACCENT,
+                text_color=ACCENT, hover_color=("gray90", "gray25"),
+                command=self.on_add_expander,
+            ).grid(row=0, column=2, padx=(8, 0))
 
     # ------------------------------------------------------------------ #
     # Tree                                                                  #

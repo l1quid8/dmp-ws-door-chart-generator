@@ -15,6 +15,15 @@ Finalize), the editor filling the window, and a status bar (save state,
 validation chips, collapsible terminal). The full ConvergeOne logo appears
 only on the home screen.
 
+## Hardware changes (v1.3)
+
+Post-CAD hardware changes happen in the editor: add or remove **714-16/714-8
+expanders** (each brings its RSP + power supply + zone block — DMP bus
+addressing: module 7 starts Z601), **710 splitters** (LX or KP), and
+**keypads**. Removal scrubs dangling references (splitter outputs → Spare,
+orphaned keypad sources flagged by the finalize gate). Template capacities
+are enforced: 15 expanders, 12 splitters per type, 28 keypads.
+
 ## Field-edit workflow (v1.1)
 
 The app is the working document; the Excel files are output artifacts.

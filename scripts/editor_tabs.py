@@ -1,19 +1,33 @@
 """SPLITTERS / KEYPADS / POWER tabs of the project editor.
 
-Form-style editors over the corresponding DMPDesign lists. The SPLITTERS tab
-absorbs the two pre-generation modal dialogs: unresolved source-data
-conflicts render as banner cards that can be resolved (or deferred — they
-block finalize, not editing), and the splitter wiring editor that used to be
-a one-shot confirmation is now permanently editable with a 'reviewed'
-checkbox feeding the topology.unconfirmed validation rule.
+Form-style editors over the corresponding DMPDesign lists, including
+post-CAD hardware changes: each tab can add and remove its hardware
+(hardware.py owns the rules; tabs own the dialogs/cards). Structure changes
+flow through on_structure_change so the editor can refresh sibling tabs —
+a new expander must appear in the ZONES grid and splitter output menus.
+
+The SPLITTERS tab also absorbs the two old pre-generation modal dialogs:
+unresolved source-data conflicts render as banner cards (deferrable — they
+block finalize, not editing), and splitter wiring is permanently editable
+with a 'reviewed' checkbox feeding the topology.unconfirmed rule.
 """
 
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import messagebox
 
 import customtkinter as ctk
 
+from hardware import (
+    HardwareError,
+    add_expander,
+    add_keypad,
+    add_splitter,
+    remove_expander,
+    remove_keypad,
+    remove_splitter,
+)
 from session import Session
 
 ACCENT = "#4a7bb8"
@@ -43,11 +57,161 @@ def auto_hide_scrollbar(scrollframe: ctk.CTkScrollableFrame) -> None:
     update()
 
 
+# ------------------------------------------------------------------ #
+# Add-hardware dialogs (shared)                                         #
+# ------------------------------------------------------------------ #
+
+def _dialog_shell(root, title: str) -> ctk.CTkToplevel:
+    win = ctk.CTkToplevel(root)
+    win.title(title)
+    win.transient(root)
+    win.grab_set()
+    win.resizable(False, False)
+    return win
+
+
+def _dialog_buttons(win, confirm_text: str, on_confirm) -> None:
+    row = ctk.CTkFrame(win, fg_color="transparent")
+    row.pack(fill="x", padx=20, pady=(8, 16))
+    row.columnconfigure(0, weight=1)
+    row.columnconfigure(1, weight=1)
+    ctk.CTkButton(row, text="Cancel", height=34, fg_color="transparent",
+                  border_width=1, border_color="gray60",
+                  text_color=("gray30", "gray80"),
+                  hover_color=("gray90", "gray25"),
+                  command=lambda: (win.grab_release(), win.destroy()),
+                  ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ctk.CTkButton(row, text=confirm_text, height=34, fg_color=ACCENT,
+                  hover_color=ACCENT_HOVER, font=ctk.CTkFont(weight="bold"),
+                  command=on_confirm,
+                  ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+
+def prompt_add_expander(root, session: Session, on_done) -> None:
+    win = _dialog_shell(root, "Add expander")
+    ctk.CTkLabel(win, text="Add a 714 expander (RSP + power supply + zone block)",
+                 font=ctk.CTkFont(size=13, weight="bold"),
+                 ).pack(anchor="w", padx=20, pady=(16, 8))
+
+    model_var = tk.StringVar(value="714-16")
+    for model, label in [("714-16", "714-16  (16 points)"),
+                         ("714-8", "714-8  (8 points)")]:
+        ctk.CTkRadioButton(win, text=label, variable=model_var, value=model,
+                           ).pack(anchor="w", padx=28, pady=3)
+
+    loc = ctk.CTkEntry(win, width=320, height=34,
+                       placeholder_text="Location (e.g. BLDG A 1ST FLR IDF)")
+    loc.pack(padx=20, pady=(10, 0))
+
+    def confirm():
+        try:
+            add_expander(session.design, model_var.get(),
+                         loc.get().strip() or None)
+        except HardwareError as exc:
+            messagebox.showerror("Can't add expander", str(exc), parent=win)
+            return
+        win.grab_release()
+        win.destroy()
+        on_done()
+
+    _dialog_buttons(win, "Add expander", confirm)
+
+
+def prompt_add_splitter(root, session: Session, on_done) -> None:
+    win = _dialog_shell(root, "Add splitter")
+    ctk.CTkLabel(win, text="Add a 710 splitter-repeater",
+                 font=ctk.CTkFont(size=13, weight="bold"),
+                 ).pack(anchor="w", padx=20, pady=(16, 8))
+
+    type_var = tk.StringVar(value="LX")
+    for stype, label in [("LX", "LX bus  (710-LX500-N — RSP feeds)"),
+                         ("KP", "KP bus  (710-KP-N — keypad feeds)")]:
+        ctk.CTkRadioButton(win, text=label, variable=type_var, value=stype,
+                           ).pack(anchor="w", padx=28, pady=3)
+
+    loc = ctk.CTkEntry(win, width=320, height=34, placeholder_text="Location")
+    loc.pack(padx=20, pady=(10, 0))
+
+    def confirm():
+        try:
+            add_splitter(session.design, type_var.get(), loc.get().strip() or None)
+        except HardwareError as exc:
+            messagebox.showerror("Can't add splitter", str(exc), parent=win)
+            return
+        win.grab_release()
+        win.destroy()
+        on_done()
+
+    _dialog_buttons(win, "Add splitter", confirm)
+
+
+def _keypad_source_choices(session: Session) -> list[str]:
+    # Keypads ride the KP bus: fed straight from the panel (MSP) or from a
+    # KP-type splitter output.
+    return ["MSP"] + [s.id for s in session.design.splitters
+                      if s.splitter_type == "KP"]
+
+
+def prompt_add_keypad(root, session: Session, on_done) -> None:
+    win = _dialog_shell(root, "Add keypad")
+    ctk.CTkLabel(win, text="Add a keypad",
+                 font=ctk.CTkFont(size=13, weight="bold"),
+                 ).pack(anchor="w", padx=20, pady=(16, 8))
+
+    loc = ctk.CTkEntry(win, width=320, height=34, placeholder_text="Location")
+    loc.pack(padx=20, pady=(2, 8))
+
+    source_menu = ctk.CTkOptionMenu(
+        win, values=_keypad_source_choices(session), width=320, height=32,
+        fg_color=("gray90", "gray25"), text_color=("gray15", "gray90"),
+        button_color=ACCENT, button_hover_color=ACCENT_HOVER,
+    )
+    source_menu.pack(padx=20)
+
+    glob_var = tk.BooleanVar(value=False)
+    ctk.CTkCheckBox(win, text="Global keypad", variable=glob_var,
+                    checkmark_color="white", fg_color=ACCENT,
+                    hover_color=ACCENT_HOVER,
+                    ).pack(anchor="w", padx=20, pady=(10, 0))
+
+    def confirm():
+        try:
+            add_keypad(session.design, loc.get().strip() or None,
+                       source_menu.get(), glob_var.get())
+        except HardwareError as exc:
+            messagebox.showerror("Can't add keypad", str(exc), parent=win)
+            return
+        win.grab_release()
+        win.destroy()
+        on_done()
+
+    _dialog_buttons(win, "Add keypad", confirm)
+
+
+def _add_button(parent, text: str, command) -> ctk.CTkButton:
+    return ctk.CTkButton(parent, text=text, height=30, width=150,
+                         fg_color="transparent", border_width=1,
+                         border_color=ACCENT, text_color=ACCENT,
+                         hover_color=("gray90", "gray25"), command=command)
+
+
+def _remove_button(parent, command) -> ctk.CTkButton:
+    return ctk.CTkButton(parent, text="✕", width=28, height=24,
+                         fg_color="transparent", text_color="gray50",
+                         hover_color=("#f3dada", "gray25"), command=command)
+
+
+# ------------------------------------------------------------------ #
+# SPLITTERS                                                             #
+# ------------------------------------------------------------------ #
+
 class SplittersTab(ctk.CTkFrame):
-    def __init__(self, master, session: Session, on_change):
+    def __init__(self, master, session: Session, on_change,
+                 on_structure_change=None):
         super().__init__(master, fg_color="transparent")
         self.session = session
         self.on_change = on_change
+        self.on_structure_change = on_structure_change or on_change
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
@@ -66,7 +230,7 @@ class SplittersTab(ctk.CTkFrame):
             self._build_conflict_banner(conflict).grid(
                 row=row, column=0, sticky="ew", pady=(0, 8))
             row += 1
-        self._build_reviewed_row().grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        self._build_header_row().grid(row=row, column=0, sticky="ew", pady=(0, 8))
         row += 1
         design = self.session.design
         if not design.splitters:
@@ -78,7 +242,7 @@ class SplittersTab(ctk.CTkFrame):
                 row=row, column=0, sticky="ew", pady=4)
             row += 1
 
-    # ---- conflict banners (was _show_conflict_dialog) ----
+    # ---- conflict banners ----
 
     def _build_conflict_banner(self, conflict) -> ctk.CTkFrame:
         card = ctk.CTkFrame(self.body, corner_radius=8, fg_color=BANNER_BG,
@@ -115,10 +279,11 @@ class SplittersTab(ctk.CTkFrame):
         ).grid(row=r + 1, column=0, sticky="w", padx=20, pady=(0, 10))
         return card
 
-    # ---- wiring reviewed checkbox ----
+    # ---- header: reviewed checkbox + add button ----
 
-    def _build_reviewed_row(self) -> ctk.CTkFrame:
+    def _build_header_row(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self.body, fg_color="transparent")
+        frame.columnconfigure(0, weight=1)
         source = self.session.design.topology_source or "auto-derived"
         if source == "riser":
             note = "Wiring below was read from the riser diagram."
@@ -128,6 +293,9 @@ class SplittersTab(ctk.CTkFrame):
         ctk.CTkLabel(frame, text=note, font=ctk.CTkFont(size=11),
                      text_color="gray50", anchor="w", wraplength=480,
                      justify="left").grid(row=0, column=0, sticky="w")
+
+        _add_button(frame, "+ Add Splitter", self._add_clicked).grid(
+            row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
 
         self._reviewed_var = tk.BooleanVar(value=self.session.topology_confirmed)
 
@@ -143,7 +311,21 @@ class SplittersTab(ctk.CTkFrame):
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         return frame
 
-    # ---- splitter cards (was _show_topology_dialog) ----
+    def _add_clicked(self):
+        prompt_add_splitter(self.winfo_toplevel(), self.session,
+                            self.on_structure_change)
+
+    def _remove_clicked(self, splitter):
+        if not messagebox.askyesno(
+            "Remove splitter?",
+            f"Remove {splitter.id}?\n\nOutputs on other splitters that point "
+            "to it become Spare; keypads it fed will need a new source.",
+        ):
+            return
+        remove_splitter(self.session.design, splitter.id)
+        self.on_structure_change()
+
+    # ---- splitter cards ----
 
     def _output_choices(self, splitter) -> list[str]:
         design = self.session.design
@@ -169,7 +351,10 @@ class SplittersTab(ctk.CTkFrame):
         loc_var.trace_add("write", loc_edited)
         ctk.CTkEntry(card, textvariable=loc_var, height=30,
                      placeholder_text="Splitter location",
-                     ).grid(row=0, column=1, sticky="ew", padx=(8, 12), pady=(10, 0))
+                     ).grid(row=0, column=1, sticky="ew", padx=(8, 4), pady=(10, 0))
+
+        _remove_button(card, lambda s=splitter: self._remove_clicked(s)).grid(
+            row=0, column=2, padx=(0, 8), pady=(10, 0))
 
         first_input = next((v for v in splitter.inputs.values() if v), "")
         ctk.CTkLabel(card, text=f"input: {first_input or '—'}",
@@ -182,7 +367,7 @@ class SplittersTab(ctk.CTkFrame):
         for i in range(3):
             current = outs[i] if i < len(outs) else "Spare"
             row = ctk.CTkFrame(card, fg_color="transparent")
-            row.grid(row=2 + i, column=0, columnspan=2, sticky="ew",
+            row.grid(row=2 + i, column=0, columnspan=3, sticky="ew",
                      padx=20, pady=2)
             ctk.CTkLabel(row, text=f"Output {i + 1}:", width=80, anchor="w",
                          font=ctk.CTkFont(size=11)).pack(side="left")
@@ -207,123 +392,219 @@ class SplittersTab(ctk.CTkFrame):
         self.on_change()
 
 
+# ------------------------------------------------------------------ #
+# KEYPADS                                                               #
+# ------------------------------------------------------------------ #
+
 class KeypadsTab(ctk.CTkFrame):
-    def __init__(self, master, session: Session, on_change):
+    def __init__(self, master, session: Session, on_change,
+                 on_structure_change=None):
         super().__init__(master, fg_color="transparent")
         self.session = session
         self.on_change = on_change
+        self.on_structure_change = on_structure_change or on_change
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        body.grid(row=0, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=1)
-        auto_hide_scrollbar(body)
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.body.grid(row=0, column=0, sticky="nsew")
+        self.body.columnconfigure(0, weight=1)
+        auto_hide_scrollbar(self.body)
+        self.refresh()
+
+    def refresh(self):
+        for w in self.body.winfo_children():
+            w.destroy()
+
+        header = ctk.CTkFrame(self.body, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        header.columnconfigure(0, weight=1)
+        _add_button(header, "+ Add Keypad", self._add_clicked).grid(
+            row=0, column=1, sticky="e")
 
         keypads = self.session.design.keypads
         if not keypads:
-            ctk.CTkLabel(body, text="No keypads in this design.",
-                         text_color="gray50").grid(row=0, column=0, pady=24)
+            ctk.CTkLabel(self.body, text="No keypads in this design.",
+                         text_color="gray50").grid(row=1, column=0, pady=24)
             return
         for i, kp in enumerate(keypads):
-            card = ctk.CTkFrame(body, corner_radius=8, fg_color=("gray97", "gray20"))
-            card.grid(row=i, column=0, sticky="ew", pady=4)
-            card.columnconfigure(1, weight=1)
+            self._build_keypad_card(kp).grid(row=i + 1, column=0,
+                                             sticky="ew", pady=4)
 
-            ctk.CTkLabel(card, text=f"KEYPAD #{kp.number}",
-                         font=ctk.CTkFont(size=12, weight="bold"),
-                         ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+    def _add_clicked(self):
+        prompt_add_keypad(self.winfo_toplevel(), self.session,
+                          self.on_structure_change)
 
-            loc_var = tk.StringVar(value=kp.location or "")
+    def _remove_clicked(self, kp):
+        if not messagebox.askyesno(
+            "Remove keypad?",
+            f"Remove KEYPAD #{kp.number}?\n\nSplitter outputs feeding it "
+            "become Spare.",
+        ):
+            return
+        remove_keypad(self.session.design, kp.number)
+        self.on_structure_change()
 
-            def make_loc_cb(k, var):
-                def cb(*_a):
-                    k.location = var.get().strip() or None
-                    self.on_change()
-                return cb
+    def _build_keypad_card(self, kp) -> ctk.CTkFrame:
+        card = ctk.CTkFrame(self.body, corner_radius=8, fg_color=("gray97", "gray20"))
+        card.columnconfigure(1, weight=1)
 
-            loc_var.trace_add("write", make_loc_cb(kp, loc_var))
-            ctk.CTkEntry(card, textvariable=loc_var, height=30,
-                         placeholder_text="Keypad location",
-                         ).grid(row=0, column=1, sticky="ew", padx=(8, 12), pady=(10, 0))
+        ctk.CTkLabel(card, text=f"KEYPAD #{kp.number}",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
 
-            ctk.CTkLabel(card, text=f"source: {kp.source or '—'}",
-                         font=ctk.CTkFont(size=11), text_color="gray50",
-                         ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+        loc_var = tk.StringVar(value=kp.location or "")
 
-            glob_var = tk.BooleanVar(value=kp.global_keypad)
+        def loc_edited(*_a, k=kp, var=None):
+            k.location = loc_var.get().strip() or None
+            self.on_change()
 
-            def make_glob_cb(k, var):
-                def cb():
-                    k.global_keypad = var.get()
-                    self.on_change()
-                return cb
+        loc_var.trace_add("write", loc_edited)
+        ctk.CTkEntry(card, textvariable=loc_var, height=30,
+                     placeholder_text="Keypad location",
+                     ).grid(row=0, column=1, sticky="ew", padx=(8, 4), pady=(10, 0))
 
-            ctk.CTkCheckBox(
-                card, text="Global keypad", variable=glob_var,
-                command=make_glob_cb(kp, glob_var), font=ctk.CTkFont(size=11),
-                checkmark_color="white", fg_color=ACCENT, hover_color=ACCENT_HOVER,
-            ).grid(row=1, column=1, sticky="e", padx=(0, 12), pady=(0, 8))
+        _remove_button(card, lambda k=kp: self._remove_clicked(k)).grid(
+            row=0, column=2, padx=(0, 8), pady=(10, 0))
 
+        # Source is editable — a removed splitter blanks it and the
+        # keypad.source_missing rule sends the tech back here.
+        src_row = ctk.CTkFrame(card, fg_color="transparent")
+        src_row.grid(row=1, column=0, columnspan=2, sticky="w",
+                     padx=12, pady=(2, 8))
+        ctk.CTkLabel(src_row, text="source:", font=ctk.CTkFont(size=11),
+                     text_color="gray50").pack(side="left")
+        choices = _keypad_source_choices(self.session)
+        current = (kp.source or "").strip()
+        values = choices if not current or current in choices \
+            else [current] + choices
+        menu = ctk.CTkOptionMenu(
+            src_row, values=values, width=200, height=26,
+            fg_color=("gray90", "gray25"), text_color=("gray15", "gray90"),
+            button_color=ACCENT, button_hover_color=ACCENT_HOVER,
+            command=lambda value, k=kp: self._set_source(k, value),
+        )
+        menu.set(current or "— select source —")
+        menu.pack(side="left", padx=(6, 0))
+
+        glob_var = tk.BooleanVar(value=kp.global_keypad)
+
+        def glob_toggled(k=kp, var=glob_var):
+            k.global_keypad = var.get()
+            self.on_change()
+
+        ctk.CTkCheckBox(
+            card, text="Global keypad", variable=glob_var, command=glob_toggled,
+            font=ctk.CTkFont(size=11),
+            checkmark_color="white", fg_color=ACCENT, hover_color=ACCENT_HOVER,
+        ).grid(row=1, column=1, columnspan=2, sticky="e", padx=(0, 12), pady=(0, 8))
+        return card
+
+    def _set_source(self, kp, value: str):
+        kp.source = value
+        self.on_change()
+
+
+# ------------------------------------------------------------------ #
+# POWER (RSP / power-supply pairs)                                      #
+# ------------------------------------------------------------------ #
 
 class PowerTab(ctk.CTkFrame):
-    """RSP / power-supply locations. An RSP and its power supply share a room,
-    so one entry writes both (same contract as apply_location_conflict)."""
+    """RSP / power-supply locations and expander add/remove. An RSP and its
+    power supply share a room, so one entry writes both (same contract as
+    apply_location_conflict)."""
 
-    def __init__(self, master, session: Session, on_change):
+    def __init__(self, master, session: Session, on_change,
+                 on_structure_change=None):
         super().__init__(master, fg_color="transparent")
         self.session = session
         self.on_change = on_change
+        self.on_structure_change = on_structure_change or on_change
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        body.grid(row=0, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=1)
-        auto_hide_scrollbar(body)
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.body.grid(row=0, column=0, sticky="nsew")
+        self.body.columnconfigure(0, weight=1)
+        auto_hide_scrollbar(self.body)
+        self.refresh()
+
+    def refresh(self):
+        for w in self.body.winfo_children():
+            w.destroy()
 
         design = self.session.design
         ps_by_number = {ps.number: ps for ps in design.power_supplies}
+
+        header = ctk.CTkFrame(self.body, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        header.columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header,
+            text="One location per RSP — the expander, its power supply, and "
+                 "the 66 block live in the same room. Edits propagate to "
+                 "every sheet.",
+            font=ctk.CTkFont(size=11), text_color="gray50",
+            wraplength=400, justify="left", anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        _add_button(header, "+ Add Expander", self._add_clicked).grid(
+            row=0, column=1, sticky="e", padx=(8, 0))
+
         if not design.rsps:
-            ctk.CTkLabel(body, text="No RSPs in this design.",
-                         text_color="gray50").grid(row=0, column=0, pady=24)
+            ctk.CTkLabel(self.body, text="No RSPs in this design.",
+                         text_color="gray50").grid(row=1, column=0, pady=24)
             return
 
-        ctk.CTkLabel(
-            body,
-            text="One location per RSP — the expander, its power supply, and the "
-                 "66 block live in the same room. Edits propagate to every sheet.",
-            font=ctk.CTkFont(size=11), text_color="gray50",
-            wraplength=480, justify="left", anchor="w",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
-
         for i, rsp in enumerate(design.rsps):
-            card = ctk.CTkFrame(body, corner_radius=8, fg_color=("gray97", "gray20"))
-            card.grid(row=i + 1, column=0, sticky="ew", pady=4)
-            card.columnconfigure(1, weight=1)
+            self._build_rsp_card(rsp, ps_by_number).grid(
+                row=i + 1, column=0, sticky="ew", pady=4)
 
-            zr = f"Z{min(rsp.zones)}–Z{max(rsp.zones)}" if rsp.zones else "no zones"
-            ctk.CTkLabel(card, text=f"RSP-{rsp.number} / PS-{rsp.number}",
-                         font=ctk.CTkFont(size=12, weight="bold"),
-                         ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-            ctk.CTkLabel(card, text=zr, font=ctk.CTkFont(size=11),
-                         text_color="gray50",
-                         ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+    def _add_clicked(self):
+        prompt_add_expander(self.winfo_toplevel(), self.session,
+                            self.on_structure_change)
 
-            loc_var = tk.StringVar(value=rsp.location or "")
+    def _remove_clicked(self, rsp):
+        zr = f"Z{min(rsp.zones)}–Z{max(rsp.zones)}" if rsp.zones else "no zones"
+        if not messagebox.askyesno(
+            "Remove expander?",
+            f"Remove RSP-{rsp.number} / PS-{rsp.number} ({rsp.model})?\n\n"
+            f"This deletes its entire zone block ({zr}) including any "
+            "descriptions you've entered. Splitter outputs feeding it become "
+            "Spare. Module numbering keeps the gap (zone addresses are "
+            "physical).",
+        ):
+            return
+        remove_expander(self.session.design, rsp.number)
+        self.on_structure_change()
 
-            def make_cb(r, var):
-                def cb(*_a):
-                    value = var.get().strip() or None
-                    r.location = value
-                    ps = ps_by_number.get(r.number)
-                    if ps is not None:
-                        ps.location = value
-                    self.on_change()
-                return cb
+    def _build_rsp_card(self, rsp, ps_by_number) -> ctk.CTkFrame:
+        card = ctk.CTkFrame(self.body, corner_radius=8, fg_color=("gray97", "gray20"))
+        card.columnconfigure(1, weight=1)
 
-            loc_var.trace_add("write", make_cb(rsp, loc_var))
-            ctk.CTkEntry(card, textvariable=loc_var, height=30,
-                         placeholder_text="RSP location",
-                         ).grid(row=0, column=1, rowspan=2, sticky="ew",
-                                padx=(8, 12), pady=(10, 8))
+        zr = f"Z{min(rsp.zones)}–Z{max(rsp.zones)}" if rsp.zones else "no zones"
+        ctk.CTkLabel(card, text=f"RSP-{rsp.number} / PS-{rsp.number}",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(card, text=f"{rsp.model} · {zr}", font=ctk.CTkFont(size=11),
+                     text_color="gray50",
+                     ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+
+        loc_var = tk.StringVar(value=rsp.location or "")
+
+        def loc_edited(*_a, r=rsp):
+            value = loc_var.get().strip() or None
+            r.location = value
+            ps = ps_by_number.get(r.number)
+            if ps is not None:
+                ps.location = value
+            self.on_change()
+
+        loc_var.trace_add("write", loc_edited)
+        ctk.CTkEntry(card, textvariable=loc_var, height=30,
+                     placeholder_text="RSP location",
+                     ).grid(row=0, column=1, rowspan=2, sticky="ew",
+                            padx=(8, 4), pady=(10, 8))
+
+        _remove_button(card, lambda r=rsp: self._remove_clicked(r)).grid(
+            row=0, column=2, rowspan=2, padx=(0, 8))
+        return card
