@@ -21,7 +21,6 @@ from generate_dmp_ws import (
     write_dmp_xlsx,
     ensure_searchable_pdf,
     resolve_original_pdf,
-    apply_location_conflict,
     DEFAULT_TEMPLATE,
 )
 from parse_dmp_worksheet import parse_dmp_worksheet, worksheet_looks_like_dmp
@@ -35,6 +34,7 @@ from session import (
     list_recent_sessions,
     load_recovery,
     load_session,
+    normalize_rsp_tokens,
     pending_recovery,
     sync_master_zones,
 )
@@ -771,7 +771,6 @@ class App:
     def _start_parse(self, pdf_path: Path):
         self.pdf_path = pdf_path
         self.parsed_design = None
-        self._topology_confirmed = False
         self.state = "parsing"
         self._stop_spinners()
         self._show_file_card(pdf_path.name, parsing=True)
@@ -882,11 +881,12 @@ class App:
     def _enter_editor(self, session: Session):
         """Open the unified editor over a session (new or loaded)."""
         # Make zones editable even when only Master rows were parsed (xlsx with
-        # unevaluated Point Info formulas).
+        # unevaluated Point Info formulas), and canonicalize legacy 'RSP N'
+        # splitter tokens so validation only flags hand-typed regressions.
         ensure_editable_zones(session.design)
+        normalize_rsp_tokens(session.design)
         self.session = session
         self.parsed_design = session.design  # generation flows read this
-        self._topology_confirmed = session.topology_confirmed
         self.state = "editing"
 
         self._teardown_editor()
@@ -1008,151 +1008,9 @@ class App:
     # Flow: generate DMP                                                    #
     # ------------------------------------------------------------------ #
 
-    def _show_conflict_dialog(self, design, on_resolved):
-        """Modal dialog: let the user pick the correct value for each location
-        the CAD prints disagree on, apply the choices, then re-enter on_resolved."""
-        conflicts = list(design.conflicts)
-
-        win = ctk.CTkToplevel(self.root)
-        win.title("Review source-data inconsistencies")
-        win.geometry("600x520")
-        win.transient(self.root)
-        win.grab_set()
-        win.protocol("WM_DELETE_WINDOW", lambda: None)  # force an explicit choice
-
-        ctk.CTkLabel(
-            win,
-            text="The CAD prints disagree on these locations.\n"
-                 "Choose the correct value for each before generating.",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            justify="left",
-        ).pack(anchor="w", padx=20, pady=(18, 8))
-
-        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=12, pady=4)
-
-        rows = []  # (conflict, value_var, custom_entry)
-        for c in conflicts:
-            card = ctk.CTkFrame(body)
-            card.pack(fill="x", padx=6, pady=6)
-            ctk.CTkLabel(
-                card, text=c.label,
-                font=ctk.CTkFont(size=12, weight="bold"),
-            ).pack(anchor="w", padx=12, pady=(10, 2))
-
-            value_var = tk.StringVar(value=c.options[0][0])
-            for value, source in c.options:
-                ctk.CTkRadioButton(
-                    card, text=f"{value}    ({source})",
-                    variable=value_var, value=value,
-                ).pack(anchor="w", padx=20, pady=2)
-
-            custom = ctk.CTkEntry(card, placeholder_text="…or type the correct value")
-            custom.pack(fill="x", padx=20, pady=(4, 10))
-            rows.append((c, value_var, custom))
-
-        def confirm():
-            for conflict, value_var, custom in rows:
-                chosen = custom.get().strip() or value_var.get()
-                apply_location_conflict(design, conflict, chosen)
-            design.conflicts = []
-            win.grab_release()
-            win.destroy()
-            on_resolved()
-
-        ctk.CTkButton(
-            win, text="Use selected values", height=40,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER,
-            font=ctk.CTkFont(weight="bold"),
-            command=confirm,
-        ).pack(fill="x", padx=20, pady=(6, 18))
-
-    def _show_topology_dialog(self, design, on_resolved):
-        """Modal dialog: show the splitter wiring the app derived (from the riser
-        diagram, or the fallback convention) and let the user correct it before
-        the worksheet is generated."""
-        splitters = list(design.splitters)
-        rsp_names = [f"RSP {r.number}" for r in design.rsps]
-        kp_names = [f"KEYPAD #{k.number}" for k in design.keypads if k.number != 1]
-
-        win = ctk.CTkToplevel(self.root)
-        win.title("Confirm splitter wiring")
-        win.geometry("640x600")
-        win.transient(self.root)
-        win.grab_set()
-        win.protocol("WM_DELETE_WINDOW", lambda: None)
-
-        source = getattr(design, "topology_source", "") or "auto-derived"
-        if source == "riser":
-            head = "Wiring read from the riser diagram (INT-5.0). Confirm or correct it:"
-        else:
-            head = ("Riser extraction was incomplete — the wiring below is a "
-                    "best-guess convention. Check it against the riser diagram:")
-        ctk.CTkLabel(
-            win, text=head, font=ctk.CTkFont(size=13, weight="bold"),
-            justify="left", wraplength=600,
-        ).pack(anchor="w", padx=20, pady=(18, 8))
-
-        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=12, pady=4)
-
-        rows = []  # (splitter, [menu, menu, menu])
-        for s in splitters:
-            others = [f"To {o.id}" for o in splitters if o.id != s.id]
-            choices = ["Spare"] + rsp_names + kp_names + others
-            card = ctk.CTkFrame(body)
-            card.pack(fill="x", padx=6, pady=6)
-            ctk.CTkLabel(
-                card, text=f"{s.id}   —   {s.location or 'location TBD'}",
-                font=ctk.CTkFont(size=12, weight="bold"),
-            ).pack(anchor="w", padx=12, pady=(10, 0))
-            inp = list(s.inputs.values())[0] if s.inputs else ""
-            ctk.CTkLabel(card, text=f"input: {inp}", font=ctk.CTkFont(size=11),
-                         text_color="gray40").pack(anchor="w", padx=12, pady=(0, 4))
-            menus = []
-            outs = list(s.outputs or [])
-            for i in range(3):
-                cur = outs[i] if i < len(outs) else "Spare"
-                row = ctk.CTkFrame(card, fg_color="transparent")
-                row.pack(fill="x", padx=20, pady=2)
-                ctk.CTkLabel(row, text=f"Output {i + 1}:", width=80,
-                             anchor="w").pack(side="left")
-                ch = list(choices) if cur in choices else [cur] + list(choices)
-                m = ctk.CTkOptionMenu(row, values=ch, width=380)
-                m.set(cur)
-                m.pack(side="left", padx=(6, 0))
-                menus.append(m)
-            ctk.CTkLabel(card, text="").pack(pady=(0, 4))
-            rows.append((s, menus))
-
-        def confirm():
-            for s, menus in rows:
-                s.outputs = [m.get() for m in menus]
-            self._topology_confirmed = True
-            if self.session:
-                self.session.topology_confirmed = True
-            win.grab_release()
-            win.destroy()
-            on_resolved()
-
-        ctk.CTkButton(
-            win, text="Confirm wiring", height=40,
-            fg_color=ACCENT, hover_color=ACCENT_HOVER,
-            font=ctk.CTkFont(weight="bold"), command=confirm,
-        ).pack(fill="x", padx=20, pady=(6, 18))
-
     def _start_generating_dmp(self):
-        # Escalate any source-data inconsistencies before generating. The dialog
-        # resolves them onto the design, then re-enters this method.
-        if getattr(self.parsed_design, "conflicts", None):
-            self._show_conflict_dialog(self.parsed_design, self._start_generating_dmp)
-            return
-
-        # Confirm the splitter wiring (extraction can mis-route — esp. keypads).
-        if (self.parsed_design.splitters
-                and not getattr(self, "_topology_confirmed", False)):
-            self._show_topology_dialog(self.parsed_design, self._start_generating_dmp)
-            return
+        # Conflicts and topology review now live in the editor (SPLITTERS tab)
+        # and are enforced by the finalize gate rather than modal escalations.
 
         # Job details now live on the design itself (written through by the
         # editor's SITE tab). Persist the per-machine ones as defaults.

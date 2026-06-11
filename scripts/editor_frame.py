@@ -20,6 +20,7 @@ import customtkinter as ctk
 from session import Session, save_session, sync_master_zones, write_recovery, clear_recovery
 from validation import validate_design, badge_counts
 from editor_zones import ZonesTab
+from editor_tabs import SplittersTab, KeypadsTab, PowerTab
 
 ACCENT = "#4a7bb8"
 ACCENT_HOVER = "#3a6aa8"
@@ -164,21 +165,26 @@ class EditorFrame(ctk.CTkFrame):
         self.zones = ZonesTab(zones_tab, self.session.design, self._on_zones_edit)
         self.zones.grid(row=0, column=0, sticky="nsew")
 
-        for title in TAB_TITLES[2:]:
-            self._build_placeholder_tab(self.tabs.tab(title), title)
+        for title, cls, attr in [("SPLITTERS", SplittersTab, "splitters_tab"),
+                                 ("KEYPADS", KeypadsTab, "keypads_tab"),
+                                 ("POWER", PowerTab, "power_tab")]:
+            tab = self.tabs.tab(title)
+            tab.columnconfigure(0, weight=1)
+            tab.rowconfigure(0, weight=1)
+            widget = cls(tab, self.session, self._on_design_edit)
+            widget.grid(row=0, column=0, sticky="nsew")
+            setattr(self, attr, widget)
 
     def _on_zones_edit(self):
         sync_master_zones(self.session.design)
         self.mark_dirty()
         self.refresh_validation()
 
-    def _build_placeholder_tab(self, tab, title: str):
-        tab.columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            tab, text=f"{title} editing arrives in a later build.\n"
-                      "Data parsed from the prints is preserved and exported as-is.",
-            font=ctk.CTkFont(size=12), text_color="gray50", justify="center",
-        ).grid(row=0, column=0, pady=40)
+    def _on_design_edit(self):
+        """Splitter/keypad/power edits: RSP locations feed master rows too."""
+        sync_master_zones(self.session.design)
+        self.mark_dirty()
+        self.refresh_validation()
 
     def _build_footer(self):
         bar = ctk.CTkFrame(self, fg_color="transparent")

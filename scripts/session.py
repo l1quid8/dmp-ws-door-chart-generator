@@ -214,6 +214,18 @@ def ensure_editable_zones(design: DMPDesign) -> None:
                                      device_type=dtype, partition=1))
 
 
+def normalize_rsp_tokens(design: DMPDesign) -> None:
+    """Canonicalize splitter output tokens to the written 'RSP-N' convention.
+
+    The PDF topology builders emit legacy 'RSP N' tokens; normalizing once at
+    editor entry keeps the naming.rsp_hyphen rule quiet on generator output so
+    it only flags hand-typed regressions.
+    """
+    from validation import rsp_hyphen_fix
+    for sp in design.splitters:
+        sp.outputs = [rsp_hyphen_fix(o) if o else o for o in sp.outputs]
+
+
 def sync_master_zones(design: DMPDesign) -> None:
     """Rebuild master_zones from the (possibly edited) zones list.
 

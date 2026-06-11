@@ -864,7 +864,8 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path,
             return ""
         if output_desc == "Spare":
             return "Spare"
-        m = re.match(r"^RSP\s*(\d+)$", output_desc, re.IGNORECASE)
+        # Accept both 'RSP 1' (legacy token) and 'RSP-1' (written convention).
+        m = re.match(r"^RSP[\s-]*(\d+)$", output_desc, re.IGNORECASE)
         if m:
             n = int(m.group(1))
             for r in design.rsps:
