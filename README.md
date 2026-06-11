@@ -7,6 +7,26 @@ One codebase runs on both operating systems — platform differences are handled
 at runtime via `sys.platform` checks. The app is built into a native `.app`
 (macOS) or a one-folder app — a folder holding the `.exe` (Windows).
 
+## Field-edit workflow (v1.1)
+
+The app is the working document; the Excel files are output artifacts.
+
+1. **Import** — drop a design PDF, a DMP worksheet (`.xlsx`), or a saved
+   project (`.dmps`). Parsing lands in a tabbed editor (SITE / ZONES /
+   SPLITTERS / KEYPADS / POWER).
+2. **Edit & save** — correct what the prints got wrong (zone descriptions,
+   splitter wiring, RSP locations). Explicit save (`Ctrl/Cmd+S`) writes a
+   `.dmps` project file (plain JSON) under `<output>/Sessions/`; a background
+   recovery file guards against crashes. Projects reopen from the home
+   screen's Recent Projects list, across days and site visits.
+3. **Export Draft** — anytime; the file is stamped `DRAFT`, carries a
+   NOT-FOR-INSTALL banner, and is refused on re-import (the project file is
+   the source of truth).
+4. **Finalize** — a validation gate (required IP/gateway/tech/date, no blank
+   or placeholder zone descriptions, `RSP-N`/`SPARE` naming, conflicts
+   resolved, wiring reviewed) must pass before the `FINAL`-stamped worksheet
+   and door chart are generated.
+
 ## Repository layout
 
 | Path | Purpose |

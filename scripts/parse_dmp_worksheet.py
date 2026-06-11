@@ -198,12 +198,13 @@ def worksheet_looks_like_dmp(design: DMPDesign) -> bool:
 
 
 def _parse_site_info(ws) -> SiteInfo:
-    """Extract school name, code, phone from SITE INFO sheet."""
+    """Extract school/job fields from the SITE INFO sheet."""
     info = SiteInfo()
     for row in ws.iter_rows(min_row=1, max_row=30, values_only=True):
         if not row or not row[0]:
             continue
         label = str(row[0]).strip()
+        label_up = label.upper()
         value = row[1] if len(row) > 1 else None
         if not value:
             continue
@@ -216,6 +217,12 @@ def _parse_site_info(ws) -> SiteInfo:
             info.phone = str(value).strip()
         elif "Install Tech" in label:
             info.install_tech = str(value).strip()
+        elif "Install Date" in label:
+            info.install_date = str(value).strip()
+        elif "IP ADDRESS" in label_up:
+            info.ip_address = str(value).strip()
+        elif "DEFAULT GATEWAY" in label_up:
+            info.default_gateway = str(value).strip()
 
     return info
 
