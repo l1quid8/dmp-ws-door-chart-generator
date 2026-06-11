@@ -203,7 +203,7 @@ class EditorFrame(ctk.CTkFrame):
             bar, text="Finalize…", height=40,
             fg_color=ACCENT, hover_color=ACCENT_HOVER,
             font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._on_finalize,
+            command=self._show_finalize_dialog,
         ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
         if self._on_generate_charts and self.session.source_kind == "xlsx":
@@ -213,6 +213,121 @@ class EditorFrame(ctk.CTkFrame):
                 hover_color=("gray90", "gray25"),
                 command=self._on_generate_charts,
             ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+    # ------------------------------------------------------------------ #
+    # Finalize gate                                                         #
+    # ------------------------------------------------------------------ #
+
+    def goto_issue(self, issue):
+        """Jump to the tab (and zone row) an Issue points at."""
+        if issue.tab in TAB_TITLES:
+            self.tabs.set(issue.tab)
+        ref = issue.ref or ""
+        if ref.startswith("zone:") and hasattr(self, "zones"):
+            with contextlib.suppress(ValueError):
+                self.zones.select_zone(int(ref.split(":", 1)[1]))
+
+    def _show_finalize_dialog(self):
+        issues = self.refresh_validation()
+        errors = [i for i in issues if i.severity == "error"]
+        warnings = [i for i in issues if i.severity == "warning"]
+        design = self.session.design
+
+        win = ctk.CTkToplevel(self.root)
+        win.title("Finalize worksheet")
+        win.geometry("620x520")
+        win.transient(self.root)
+        win.grab_set()
+
+        if errors:
+            head = f"{len(errors)} issue{'s' if len(errors) != 1 else ''} to resolve before FINAL"
+            color = "#c05621"
+        else:
+            head = "All checks passed — ready to generate the FINAL worksheet"
+            color = "#2f855a"
+        ctk.CTkLabel(win, text=head, font=ctk.CTkFont(size=14, weight="bold"),
+                     text_color=color).pack(anchor="w", padx=20, pady=(18, 8))
+
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=12, pady=4)
+        body.columnconfigure(0, weight=1)
+
+        row = 0
+        by_tab: dict[str, list] = {}
+        for issue in errors + warnings:
+            by_tab.setdefault(issue.tab, []).append(issue)
+        for tab_name in TAB_TITLES:
+            tab_issues = by_tab.get(tab_name)
+            if not tab_issues:
+                continue
+            ctk.CTkLabel(body, text=tab_name,
+                         font=ctk.CTkFont(size=12, weight="bold"),
+                         ).grid(row=row, column=0, sticky="w", padx=8, pady=(8, 2))
+            row += 1
+            for issue in tab_issues:
+                line = ctk.CTkFrame(body, fg_color="transparent")
+                line.grid(row=row, column=0, sticky="ew", padx=8)
+                line.columnconfigure(1, weight=1)
+                is_err = issue.severity == "error"
+                ctk.CTkLabel(line, text="✗" if is_err else "⚠", width=20,
+                             text_color="#c0392b" if is_err else "#c05621",
+                             font=ctk.CTkFont(size=12, weight="bold"),
+                             ).grid(row=0, column=0)
+                ctk.CTkLabel(line, text=issue.message, anchor="w",
+                             font=ctk.CTkFont(size=11), wraplength=420,
+                             justify="left",
+                             ).grid(row=0, column=1, sticky="w")
+
+                def goto(i=issue):
+                    win.grab_release()
+                    win.destroy()
+                    self.goto_issue(i)
+
+                ctk.CTkButton(line, text="Go to", width=56, height=24,
+                              fg_color="transparent", border_width=1,
+                              border_color=ACCENT, text_color=ACCENT,
+                              hover_color=("gray90", "gray25"), command=goto,
+                              ).grid(row=0, column=2, padx=(6, 0), pady=1)
+                row += 1
+
+        if not errors:
+            n_zones = len(design.zones)
+            n_spares = sum(1 for z in design.zones
+                           if (z.location or "").strip().upper() == "SPARE")
+            summary = (f"{design.site_info.school_name or 'Unknown school'}\n"
+                       f"{n_zones} zones ({n_spares} spare) · "
+                       f"{len(design.rsps)} RSPs · {len(design.keypads)} keypads · "
+                       f"{len(design.splitters)} splitters")
+            ctk.CTkLabel(body, text=summary, font=ctk.CTkFont(size=12),
+                         justify="left", anchor="w",
+                         ).grid(row=row, column=0, sticky="w", padx=8, pady=12)
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=(6, 18))
+        btn_row.columnconfigure(0, weight=1)
+        btn_row.columnconfigure(1, weight=1)
+
+        def close():
+            win.grab_release()
+            win.destroy()
+
+        ctk.CTkButton(btn_row, text="Back to editing", height=40,
+                      fg_color="transparent", border_width=2, border_color="gray60",
+                      text_color=("gray30", "gray80"),
+                      hover_color=("gray90", "gray25"), command=close,
+                      ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        def generate():
+            win.grab_release()
+            win.destroy()
+            self._on_finalize()
+
+        gen_btn = ctk.CTkButton(btn_row, text="Generate FINAL worksheet", height=40,
+                                fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                                font=ctk.CTkFont(weight="bold"), command=generate)
+        gen_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        if errors:
+            gen_btn.configure(state="disabled")
 
     # ------------------------------------------------------------------ #
     # Validation summary                                                    #
