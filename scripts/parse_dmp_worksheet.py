@@ -107,6 +107,7 @@ class DMPDesign:
     master_zones: list[Zone] = field(default_factory=list)   # NEW: from Master sheet
     conflicts: list = field(default_factory=list)            # unresolved source-data conflicts
     topology_source: str = ""                                # "riser" | "auto-derived"
+    master_zones_source: str = ""                            # "master" | "point_info"
 
 
 # -------- parsing helpers --------
@@ -164,8 +165,33 @@ def parse_dmp_worksheet(xlsx_path: str | Path) -> DMPDesign:
             zones = _parse_point_info(wb[sheet_name])
             design.zones.extend(zones)
 
+    # Older worksheets predate the Master sheet but still carry every zone in the
+    # Point Info sheets (parsed into design.zones above). When Master is absent,
+    # reconstruct master_zones from that data so the door chart's zone area still
+    # populates. New-format worksheets keep a Master sheet and skip this entirely.
+    design.master_zones_source = "master" if design.master_zones else ""
+    if not design.master_zones and design.zones:
+        design.master_zones = _master_zones_from_point_info(design.zones, design.rsps)
+        design.master_zones_source = "point_info"
+        print(f"  Master sheet absent — reconstructed {len(design.master_zones)} "
+              f"zones from Point Info sheets")
+
     wb.close()
     return design
+
+
+def worksheet_looks_like_dmp(design: DMPDesign) -> bool:
+    """True if a parsed worksheet carries the load-bearing DMP signals.
+
+    parse_dmp_worksheet is permissive — every sheet is read behind an
+    ``if NAME in wb.sheetnames`` guard, so a wrong/unrelated .xlsx parses into an
+    (almost) empty DMPDesign instead of raising. inject() is likewise defensive and
+    would then silently write a *blank* door chart. Callers that accept an arbitrary
+    user-supplied workbook should gate on this: require at least a school name
+    (from SITE INFO) or zone rows (from Master) before treating it as a real DMP
+    worksheet.
+    """
+    return bool(design.site_info.school_name or design.master_zones)
 
 
 def _parse_site_info(ws) -> SiteInfo:
@@ -476,6 +502,53 @@ def _parse_master_zones(ws, rsps: list[RSP]) -> list[Zone]:
             is_ps_ac=is_ps_ac,
             is_ps_batt=is_ps_batt,
         ))
+    return out
+
+
+def _master_zones_from_point_info(zones: list[ZoneInfo], rsps: list[RSP]) -> list[Zone]:
+    """Reconstruct Master-sheet zone rows from the per-RSP Point Info sheets.
+
+    Fallback for older worksheets that have no 'Master' sheet. parse_dmp_worksheet
+    already reads the 'DMP 714-16 Point Info' sheets into ZoneInfo (number, room
+    location, device_type); this turns them into the Zone list the door chart
+    consumes, mirroring what generate_dmp_ws.py writes into Master so that
+    inject() and the door chart's conditional formatting behave identically.
+
+    The exact phrases 'A/C LOSS' / 'BATT. TRBL' (and the 'PS-N:' prefix) are
+    required: the door chart's conditional formatting keys on them, and a later
+    re-parse of a regenerated Master via _PS_AC_RE/_PS_BATT_RE expects that shape.
+    """
+    zone_to_rsp: dict[int, int] = {z: r.number for r in rsps for z in r.zones}
+
+    out: list[Zone] = []
+    for zi in sorted(zones, key=lambda z: z.number):
+        loc = (zi.location or "").strip()
+        loc_up = loc.upper()
+        dtype = (zi.device_type or "").strip().lower()
+        rsp_num = zone_to_rsp.get(zi.number)
+
+        if loc_up == "SPARE":
+            out.append(Zone(
+                number=zi.number, description="SPARE",
+                rsp_number=None, is_spare=True,
+            ))
+        elif dtype == "supervisory" or "TROUBLE" in loc_up:
+            ps = f"PS-{rsp_num}" if rsp_num else "PS"
+            if "BATT" in loc_up:
+                out.append(Zone(
+                    number=zi.number, description=f"{ps}: BATT. TRBL",
+                    rsp_number=rsp_num, is_ps_batt=True,
+                ))
+            else:
+                out.append(Zone(
+                    number=zi.number, description=f"{ps}: A/C LOSS",
+                    rsp_number=rsp_num, is_ps_ac=True,
+                ))
+        else:
+            out.append(Zone(
+                number=zi.number, description=loc,
+                rsp_number=rsp_num,
+            ))
     return out
 
 

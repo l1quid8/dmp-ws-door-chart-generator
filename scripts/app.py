@@ -23,7 +23,7 @@ from generate_dmp_ws import (
     apply_location_conflict,
     DEFAULT_TEMPLATE,
 )
-from parse_dmp_worksheet import parse_dmp_worksheet
+from parse_dmp_worksheet import parse_dmp_worksheet, worksheet_looks_like_dmp
 from inject_door_chart import inject, _slugify
 
 DOOR_CHART_TEMPLATE = resource_path("door_chart_template_blank.xlsx")
@@ -246,12 +246,12 @@ class App:
         ctk.CTkLabel(dz, text="⬆", font=ctk.CTkFont(size=36)).grid(row=0, column=0, pady=(22, 2))
         ctk.CTkLabel(
             dz,
-            text="Drop PDF here or click to browse",
+            text="Drop a PDF or DMP worksheet (.xlsx) here or click to browse",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=1, column=0)
         ctk.CTkLabel(
             dz,
-            text="e.g. SCHOOL_INTRUSION_DESIGN.pdf",
+            text="e.g. SCHOOL_INTRUSION_DESIGN.pdf  or  SCHOOL_dmp_2026-05-29.xlsx",
             font=ctk.CTkFont(size=11),
             text_color="gray50",
         ).grid(row=2, column=0, pady=(2, 14))
@@ -264,7 +264,8 @@ class App:
             widget.bind("<Enter>", on_enter)
             widget.bind("<Leave>", on_leave)
 
-    def _show_file_card(self, filename: str, *, parsing: bool, school_name: str = ""):
+    def _show_file_card(self, filename: str, *, parsing: bool, school_name: str = "",
+                        busy_text: str = " Parsing PDF…"):
         self._clear_input_section()
 
         card = ctk.CTkFrame(
@@ -297,7 +298,7 @@ class App:
             )
             self._det_spinner_lbl.pack(side="left")
             ctk.CTkLabel(
-                det_frame, text=" Parsing PDF…", text_color="gray50", font=ctk.CTkFont(size=12)
+                det_frame, text=busy_text, text_color="gray50", font=ctk.CTkFont(size=12)
             ).pack(side="left")
             self._start_label_spinner(self._det_spinner_lbl)
         else:
@@ -322,9 +323,9 @@ class App:
             command=self._replace_pdf,
         ).grid(row=0, column=2, rowspan=2, padx=12, pady=14)
 
-    def _show_parse_error(self, exc: Exception):
+    def _show_parse_error(self, exc: Exception, title: str = "Couldn't parse PDF"):
         self._clear_input_section()
-        self._make_error_card(self.input_section, "Couldn't parse PDF", exc, self._show_drop_zone)
+        self._make_error_card(self.input_section, title, exc, self._show_drop_zone)
 
     # ------------------------------------------------------------------ #
     # Section 2 — Metadata form                                            #
@@ -452,23 +453,37 @@ class App:
         cl_frame.grid(row=1, column=0, sticky="ew")
         self._run_checklist(cl_frame, steps, self._on_dmp_anim_done)
 
-    def _show_action_review_dmp(self):
+    def _show_action_review_dmp(self, header: str = "Review DMP Worksheet",
+                                btn1_text: str = "Open DMP in Excel",
+                                btn2_text: str = "Looks good — generate door chart",
+                                note: str = ""):
         self._clear_action_section()
 
         ctk.CTkLabel(
             self.action_section,
-            text="Review DMP Worksheet",
+            text=header,
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 12))
+        ).grid(row=0, column=0, sticky="w", pady=(0, 12 if not note else 4))
+
+        if note:
+            ctk.CTkLabel(
+                self.action_section,
+                text=note,
+                font=ctk.CTkFont(size=11),
+                text_color=ACCENT,
+                anchor="w",
+                justify="left",
+                wraplength=520,
+            ).grid(row=1, column=0, sticky="w", pady=(0, 12))
 
         btn_row = ctk.CTkFrame(self.action_section, fg_color="transparent")
-        btn_row.grid(row=1, column=0, sticky="ew")
+        btn_row.grid(row=2, column=0, sticky="ew")
         btn_row.columnconfigure(0, weight=1)
         btn_row.columnconfigure(1, weight=1)
 
         ctk.CTkButton(
             btn_row,
-            text="Open DMP in Excel",
+            text=btn1_text,
             height=40,
             fg_color="transparent",
             border_width=2,
@@ -480,7 +495,7 @@ class App:
 
         ctk.CTkButton(
             btn_row,
-            text="Looks good — generate door chart",
+            text=btn2_text,
             height=40,
             fg_color=ACCENT,
             hover_color=ACCENT_HOVER,
@@ -698,17 +713,45 @@ class App:
 
     def _choose_pdf(self):
         path = filedialog.askopenfilename(
-            title="Choose design PDF",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+            title="Choose design PDF or DMP worksheet",
+            filetypes=[
+                ("Design PDF or DMP worksheet", "*.pdf *.xlsx"),
+                ("PDF files", "*.pdf"),
+                ("DMP worksheet", "*.xlsx"),
+                ("All files", "*.*"),
+            ],
         )
         if path:
-            self._start_parse(Path(path))
+            self._start_input(Path(path))
 
     def _on_drop(self, event):
-        path_str = event.data
-        if path_str.startswith("{") and path_str.endswith("}"):
-            path_str = path_str[1:-1]
-        self._start_parse(Path(path_str))
+        # tkdnd hands back a Tcl list: one brace-wrapped path per file. Split it
+        # properly so paths containing spaces survive, and reject multi-file drops
+        # (the app processes one file at a time) with a clear message rather than a
+        # mangled path.
+        try:
+            paths = list(self.root.tk.splitlist(event.data))
+        except Exception:
+            path_str = event.data
+            if path_str.startswith("{") and path_str.endswith("}"):
+                path_str = path_str[1:-1]
+            paths = [path_str]
+        if len(paths) > 1:
+            self._show_parse_error(
+                ValueError("Please drop one file at a time."),
+                title="Too many files",
+            )
+            return
+        if paths:
+            self._start_input(Path(paths[0]))
+
+    def _start_input(self, path: Path):
+        """Route by file type: .xlsx skips straight to the door-chart flow;
+        anything else takes the existing PDF parse pipeline."""
+        if path.suffix.lower() == ".xlsx":
+            self._start_load_worksheet(path)
+        else:
+            self._start_parse(path)
 
     def _start_parse(self, pdf_path: Path):
         self.pdf_path = pdf_path
@@ -745,10 +788,74 @@ class App:
 
         self._run_async(work, on_done, on_error)
 
+    def _start_load_worksheet(self, xlsx_path: Path):
+        """Load an already-generated DMP worksheet (.xlsx) and jump straight to the
+        review/door-chart step, skipping PDF parsing and worksheet generation.
+
+        The door-chart flow (_start_generating_chart) re-parses self.dmp_path from
+        disk, so any edits the user makes in Excel between here and 'Generate Door
+        Charts' are picked up automatically.
+        """
+        self.dmp_path = xlsx_path
+        self.pdf_path = None
+        self.parsed_design = None
+        self.state = "loading_xlsx"
+        self._stop_spinners()
+        self._show_file_card(xlsx_path.name, parsing=True, busy_text=" Reading worksheet…")
+
+        def work():
+            with contextlib.redirect_stdout(self._redirector), \
+                 contextlib.redirect_stderr(self._redirector):
+                return parse_dmp_worksheet(xlsx_path)
+
+        def on_done(design):
+            if self.state != "loading_xlsx":
+                return
+            self._stop_spinners()
+            if not worksheet_looks_like_dmp(design):
+                self.state = "idle"
+                self.dmp_path = None
+                self._show_parse_error(
+                    ValueError(
+                        "This file has no SITE INFO sheet or Master zone list — "
+                        "it doesn't look like a DMP worksheet."
+                    ),
+                    title="Not a DMP worksheet",
+                )
+                return
+            self.parsed_design = design
+            self.state = "review_dmp"
+            school = design.site_info.school_name or "Unknown"
+            self._show_file_card(xlsx_path.name, parsing=False, school_name=school)
+            # Job-details form is intentionally skipped — those fields only feed
+            # worksheet generation, which we're bypassing for an imported worksheet.
+            self.meta_section.grid_remove()
+            note = ""
+            if getattr(design, "master_zones_source", "") == "point_info":
+                note = (f"No Master sheet found — reconstructed {len(design.master_zones)} "
+                        f"zones from the Point Info sheets.")
+            self._show_action_review_dmp(
+                header="DMP worksheet loaded",
+                btn1_text="Review DMP Sheet",
+                btn2_text="Generate Door Charts",
+                note=note,
+            )
+
+        def on_error(exc):
+            if self.state != "loading_xlsx":
+                return
+            self.state = "idle"
+            self.dmp_path = None
+            self._stop_spinners()
+            self._show_parse_error(exc, title="Couldn't read DMP worksheet")
+
+        self._run_async(work, on_done, on_error)
+
     def _replace_pdf(self):
         self.state = "idle"
         self._stop_spinners()
         self.pdf_path = None
+        self.dmp_path = None
         self.parsed_design = None
         self.meta_section.grid_remove()
         self.action_section.grid_remove()
