@@ -26,6 +26,19 @@ from generate_dmp_ws import (
 )
 from parse_dmp_worksheet import parse_dmp_worksheet, worksheet_looks_like_dmp
 from inject_door_chart import inject, _slugify
+from session import (
+    SESSION_EXT,
+    Session,
+    SessionLoadError,
+    clear_recovery,
+    ensure_editable_zones,
+    list_recent_sessions,
+    load_recovery,
+    load_session,
+    pending_recovery,
+    sync_master_zones,
+)
+from editor_frame import EditorFrame
 
 DOOR_CHART_TEMPLATE = resource_path("door_chart_template_blank.xlsx")
 PREFS_PATH = Path.home() / ".c1_door_chart_app.json"
@@ -103,6 +116,8 @@ class App:
         self.dmp_path: Path | None = None
         self.door_chart_path: Path | None = None
         self.parsed_design = None
+        self.session: Session | None = None
+        self.editor: EditorFrame | None = None
 
         # Dual-gate: state advances only when BOTH animation AND pipeline finish
         self._anim_done = False
@@ -111,7 +126,6 @@ class App:
         self._pipe_error = None
 
         self._spinner_jobs: list[str] = []
-        self._meta_entries: dict[str, ctk.CTkEntry] = {}
 
         # Output folder — configurable per machine via the meta section picker.
         self.output_dir: Path = output_dir()
@@ -119,6 +133,10 @@ class App:
         self._build_layout()
         self._show_drop_zone()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Manual-save shortcut (active only while the editor is open).
+        shortcut = "<Command-s>" if sys.platform == "darwin" else "<Control-s>"
+        self.root.bind_all(shortcut, self._save_shortcut)
 
         try:
             self.root.tk.call("package", "require", "tkdnd")
@@ -167,10 +185,9 @@ class App:
         self.input_section.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 0))
         self.input_section.columnconfigure(0, weight=1)
 
-        # Section 2 — metadata form (hidden until parsed)
-        self.meta_section = ctk.CTkFrame(self.content, fg_color="transparent")
-        self.meta_section.columnconfigure(0, weight=1)
-        self.meta_section.columnconfigure(1, weight=1)
+        # Section 2 — project editor host (hidden until a project is open)
+        self.editor_section = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.editor_section.columnconfigure(0, weight=1)
 
         # Section 3 — action region (hidden until parsed)
         self.action_section = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -247,12 +264,12 @@ class App:
         ctk.CTkLabel(dz, text="⬆", font=ctk.CTkFont(size=36)).grid(row=0, column=0, pady=(22, 2))
         ctk.CTkLabel(
             dz,
-            text="Drop a PDF or DMP worksheet (.xlsx) here or click to browse",
+            text="Drop a PDF, DMP worksheet (.xlsx), or project (.dmps) here",
             font=ctk.CTkFont(size=14, weight="bold"),
         ).grid(row=1, column=0)
         ctk.CTkLabel(
             dz,
-            text="e.g. SCHOOL_INTRUSION_DESIGN.pdf  or  SCHOOL_dmp_2026-05-29.xlsx",
+            text="e.g. SCHOOL_INTRUSION_DESIGN.pdf  ·  SCHOOL_dmp_2026-05-29.xlsx  ·  click to browse",
             font=ctk.CTkFont(size=11),
             text_color="gray50",
         ).grid(row=2, column=0, pady=(2, 14))
@@ -264,6 +281,86 @@ class App:
             widget.bind("<Button-1>", lambda _: self._choose_pdf())
             widget.bind("<Enter>", on_enter)
             widget.bind("<Leave>", on_leave)
+
+        self._show_recent_projects()
+        self._show_output_dir_row()
+
+    def _show_output_dir_row(self):
+        # Output-folder picker lives on the home screen now that the old
+        # job-details form (its previous host) is gone.
+        row = ctk.CTkFrame(self.input_section, fg_color="transparent")
+        row.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        row.columnconfigure(1, weight=1)
+        ctk.CTkLabel(row, text="Save output to:", font=ctk.CTkFont(size=11),
+                     text_color="gray50").grid(row=0, column=0, sticky="w")
+        self._output_dir_label = ctk.CTkLabel(
+            row, text=str(self.output_dir), font=ctk.CTkFont(size=11),
+            text_color=ACCENT, anchor="w",
+        )
+        self._output_dir_label.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        ctk.CTkButton(
+            row, text="Change…", width=80, height=24,
+            fg_color="transparent", border_width=1, border_color="gray60",
+            text_color=("gray30", "gray80"), hover_color=("gray90", "gray25"),
+            command=self._choose_output_dir,
+        ).grid(row=0, column=2, padx=(8, 0))
+
+    def _show_recent_projects(self):
+        recents = list_recent_sessions(limit=5)
+        if not recents:
+            return
+
+        frame = ctk.CTkFrame(self.input_section, fg_color="transparent")
+        frame.grid(row=1, column=0, sticky="ew", pady=(16, 0))
+        frame.columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            frame, text="Recent projects",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+        for i, summary in enumerate(recents):
+            row = ctk.CTkFrame(frame, corner_radius=8, fg_color=("gray97", "gray20"))
+            row.grid(row=i + 1, column=0, sticky="ew", pady=3)
+            row.columnconfigure(0, weight=1)
+
+            saved = (summary.saved_at or "")[:16].replace("T", " ")
+            sub = f"Saved {saved}" + (f"  ·  from {summary.source_name}"
+                                      if summary.source_name else "")
+            ctk.CTkLabel(
+                row, text=summary.school_name,
+                font=ctk.CTkFont(size=12, weight="bold"), anchor="w",
+            ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
+            ctk.CTkLabel(
+                row, text=sub, font=ctk.CTkFont(size=10),
+                text_color="gray50", anchor="w",
+            ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+
+            ctk.CTkButton(
+                row, text="Open", width=64, height=28,
+                fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                command=lambda p=summary.path: self._open_session_path(p),
+            ).grid(row=0, column=1, rowspan=2, padx=(4, 6))
+            ctk.CTkButton(
+                row, text="✕", width=28, height=28,
+                fg_color="transparent", text_color="gray50",
+                hover_color=("gray90", "gray25"),
+                command=lambda p=summary.path, n=summary.school_name:
+                    self._delete_session(p, n),
+            ).grid(row=0, column=2, rowspan=2, padx=(0, 8))
+
+    def _delete_session(self, path: Path, name: str):
+        if not messagebox.askyesno(
+            "Delete project?",
+            f"Delete the saved project for {name}?\n\n"
+            "Generated worksheets and door charts are not affected.",
+        ):
+            return
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        clear_recovery(path)
+        if self.state == "idle":
+            self._show_drop_zone()
 
     def _show_file_card(self, filename: str, *, parsing: bool, school_name: str = "",
                         busy_text: str = " Parsing PDF…"):
@@ -332,76 +429,6 @@ class App:
     # Section 2 — Metadata form                                            #
     # ------------------------------------------------------------------ #
 
-    def _show_meta_section(self):
-        # Save values already in the form before rebuilding (for Replace → re-parse)
-        saved: dict[str, str] = {}
-        for k, e in self._meta_entries.items():
-            try:
-                saved[k] = e.get()
-            except Exception:
-                pass
-
-        for w in self.meta_section.winfo_children():
-            w.destroy()
-
-        prefs = load_prefs()
-        school_code_default = ""
-        if self.parsed_design:
-            school_code_default = getattr(self.parsed_design.site_info, "school_code", "") or ""
-
-        fields = [
-            ("School code",       "school_code",     saved.get("school_code") or school_code_default),
-            ("Main phone",        "phone",            saved.get("phone") or prefs.get("phone", "")),
-            ("Install tech name", "install_tech",     saved.get("install_tech") or prefs.get("install_tech", "")),
-            ("Install date",      "install_date",     saved.get("install_date") or prefs.get("install_date", date.today().isoformat())),
-            ("IP address",        "ip_address",       saved.get("ip_address") or prefs.get("ip_address", "")),
-            ("Default gateway",   "default_gateway",  saved.get("default_gateway") or prefs.get("default_gateway", "")),
-        ]
-
-        ctk.CTkLabel(
-            self.meta_section,
-            text="Job details",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(20, 8))
-
-        self._meta_entries = {}
-        for i, (label, key, default) in enumerate(fields):
-            col = i % 2
-            row = (i // 2) + 1
-            cell = ctk.CTkFrame(self.meta_section, fg_color="transparent")
-            cell.grid(row=row, column=col, sticky="ew", padx=(0 if col == 0 else 8, 0), pady=4)
-            cell.columnconfigure(0, weight=1)
-            ctk.CTkLabel(cell, text=label, font=ctk.CTkFont(size=11), text_color="gray50", anchor="w").grid(
-                row=0, column=0, sticky="w"
-            )
-            entry = ctk.CTkEntry(cell, height=36, placeholder_text=label)
-            if default:
-                entry.insert(0, default)
-            entry.grid(row=1, column=0, sticky="ew")
-            self._meta_entries[key] = entry
-
-        # Output folder picker — spans both columns below the fields.
-        out_cell = ctk.CTkFrame(self.meta_section, fg_color="transparent")
-        out_cell.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        out_cell.columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            out_cell, text="Save output to", font=ctk.CTkFont(size=11),
-            text_color="gray50", anchor="w",
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
-        self._output_dir_label = ctk.CTkLabel(
-            out_cell, text=str(self.output_dir), font=ctk.CTkFont(size=12),
-            text_color=ACCENT, anchor="w",
-        )
-        self._output_dir_label.grid(row=1, column=0, sticky="ew")
-        ctk.CTkButton(
-            out_cell, text="Change…", width=90, height=36,
-            fg_color="transparent", border_width=1, border_color="gray60",
-            text_color=("gray30", "gray80"), hover_color=("gray90", "gray25"),
-            command=self._choose_output_dir,
-        ).grid(row=1, column=1, padx=(8, 0))
-
-        self.meta_section.grid(row=1, column=0, sticky="ew", padx=24, pady=(12, 0))
-
     def _choose_output_dir(self):
         chosen = filedialog.askdirectory(
             title="Choose output folder", initialdir=str(self.output_dir)
@@ -421,25 +448,6 @@ class App:
         for w in self.action_section.winfo_children():
             w.destroy()
         self.action_section.grid(row=2, column=0, sticky="ew", padx=24, pady=(16, 0))
-
-    def _show_action_idle(self):
-        self._clear_action_section()
-
-        ctk.CTkLabel(
-            self.action_section,
-            text="Generate",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
-
-        ctk.CTkButton(
-            self.action_section,
-            text="Generate DMP Worksheet",
-            height=42,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            command=self._start_generating_dmp,
-        ).grid(row=1, column=0, sticky="ew")
 
     def _show_action_generating_dmp(self, steps: list[str]):
         self._clear_action_section()
@@ -714,11 +722,12 @@ class App:
 
     def _choose_pdf(self):
         path = filedialog.askopenfilename(
-            title="Choose design PDF or DMP worksheet",
+            title="Choose design PDF, DMP worksheet, or saved project",
             filetypes=[
-                ("Design PDF or DMP worksheet", "*.pdf *.xlsx"),
+                ("PDF, worksheet, or project", "*.pdf *.xlsx *.dmps"),
                 ("PDF files", "*.pdf"),
                 ("DMP worksheet", "*.xlsx"),
+                ("Saved project", "*.dmps"),
                 ("All files", "*.*"),
             ],
         )
@@ -747,9 +756,14 @@ class App:
             self._start_input(Path(paths[0]))
 
     def _start_input(self, path: Path):
-        """Route by file type: .xlsx skips straight to the door-chart flow;
-        anything else takes the existing PDF parse pipeline."""
-        if path.suffix.lower() == ".xlsx":
+        """Route by file type: .dmps resumes a saved project, .xlsx imports a
+        DMP worksheet, anything else takes the PDF parse pipeline."""
+        if self.editor and not self.editor.maybe_close():
+            return
+        suffix = path.suffix.lower()
+        if suffix == SESSION_EXT:
+            self._open_session_path(path)
+        elif suffix == ".xlsx":
             self._start_load_worksheet(path)
         else:
             self._start_parse(path)
@@ -772,13 +786,11 @@ class App:
         def on_done(design):
             if self.state != "parsing":
                 return
-            self.parsed_design = design
-            self.state = "parsed"
             self._stop_spinners()
-            school = design.site_info.school_name or "Unknown"
-            self._show_file_card(pdf_path.name, parsing=False, school_name=school)
-            self._show_meta_section()
-            self._show_action_idle()
+            self._show_file_card(pdf_path.name, parsing=False,
+                                 school_name=design.site_info.school_name or "Unknown")
+            self._enter_editor(Session(design=design, source_kind="pdf",
+                                       source_name=pdf_path.name))
 
         def on_error(exc):
             if self.state != "parsing":
@@ -836,23 +848,10 @@ class App:
                     title="Draft worksheet refused",
                 )
                 return
-            self.parsed_design = design
-            self.state = "review_dmp"
             school = design.site_info.school_name or "Unknown"
             self._show_file_card(xlsx_path.name, parsing=False, school_name=school)
-            # Job-details form is intentionally skipped — those fields only feed
-            # worksheet generation, which we're bypassing for an imported worksheet.
-            self.meta_section.grid_remove()
-            note = ""
-            if getattr(design, "master_zones_source", "") == "point_info":
-                note = (f"No Master sheet found — reconstructed {len(design.master_zones)} "
-                        f"zones from the Point Info sheets.")
-            self._show_action_review_dmp(
-                header="DMP worksheet loaded",
-                btn1_text="Review DMP Sheet",
-                btn2_text="Generate Door Charts",
-                note=note,
-            )
+            self._enter_editor(Session(design=design, source_kind="xlsx",
+                                       source_name=xlsx_path.name))
 
         def on_error(exc):
             if self.state != "loading_xlsx":
@@ -865,14 +864,145 @@ class App:
         self._run_async(work, on_done, on_error)
 
     def _replace_pdf(self):
+        if self.editor and not self.editor.maybe_close():
+            return
         self.state = "idle"
         self._stop_spinners()
         self.pdf_path = None
         self.dmp_path = None
         self.parsed_design = None
-        self.meta_section.grid_remove()
+        self._teardown_editor()
         self.action_section.grid_remove()
         self._show_drop_zone()
+
+    # ------------------------------------------------------------------ #
+    # Project editor                                                         #
+    # ------------------------------------------------------------------ #
+
+    def _enter_editor(self, session: Session):
+        """Open the unified editor over a session (new or loaded)."""
+        # Make zones editable even when only Master rows were parsed (xlsx with
+        # unevaluated Point Info formulas).
+        ensure_editable_zones(session.design)
+        self.session = session
+        self.parsed_design = session.design  # generation flows read this
+        self._topology_confirmed = session.topology_confirmed
+        self.state = "editing"
+
+        self._teardown_editor()
+        self.editor = EditorFrame(
+            self.editor_section, self.root, session,
+            on_export_draft=self._export_draft,
+            on_finalize=self._finalize_from_editor,
+            on_generate_charts=(self._charts_from_worksheet
+                                if session.source_kind == "xlsx" else None),
+        )
+        self.editor.grid(row=0, column=0, sticky="nsew")
+        if session.saved_at is None:
+            # Fresh parse: seed the per-machine defaults the old form offered.
+            self.editor.prefill_site_defaults(load_prefs())
+        self.editor_section.grid(row=1, column=0, sticky="ew", padx=24, pady=(12, 0))
+        self.action_section.grid_remove()
+
+    def _teardown_editor(self):
+        if self.editor is not None:
+            self.editor.destroy()
+            self.editor = None
+        self.editor_section.grid_remove()
+
+    def _open_session_path(self, path: Path):
+        """Open a saved .dmps project, offering crash recovery when present."""
+        if self.editor and not self.editor.maybe_close():
+            return
+        try:
+            rec_time = pending_recovery(path)
+            if rec_time and messagebox.askyesno(
+                "Recover unsaved changes?",
+                f"Unsaved changes from {rec_time.strftime('%b %-d, %-I:%M %p')} "
+                "were found for this project (the app may have closed "
+                "unexpectedly).\n\nRecover them?",
+            ):
+                session = load_recovery(path)
+            else:
+                clear_recovery(path)
+                session = load_session(path)
+        except SessionLoadError as exc:
+            self._show_parse_error(exc, title="Couldn't open project")
+            return
+        self._stop_spinners()
+        self.pdf_path = None
+        self.dmp_path = None
+        self._show_file_card(path.name, parsing=False,
+                             school_name=session.design.site_info.school_name or "")
+        self._enter_editor(session)
+
+    def _save_shortcut(self, _event=None):
+        if self.state == "editing" and self.editor:
+            self.editor.save()
+
+    def _export_draft(self):
+        """Write a DRAFT-stamped worksheet from the current in-memory design."""
+        if not self.session:
+            return
+        if self.editor and self.editor.dirty and messagebox.askyesno(
+            "Save project?", "Save the project before exporting the draft?",
+        ):
+            self.editor.save()
+
+        design = self.session.design
+        sync_master_zones(design)
+        out_dir = self.output_dir
+        school_slug = _slugify(design.site_info.school_name or "output")
+
+        def work():
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / dmp_filename(school_slug, stamp="DRAFT")
+            with contextlib.redirect_stdout(self._redirector), \
+                 contextlib.redirect_stderr(self._redirector):
+                write_dmp_xlsx(design, DEFAULT_TEMPLATE, out_path, stamp="DRAFT")
+            return out_path
+
+        def on_done(out_path):
+            if messagebox.askyesno(
+                "Draft exported",
+                f"Draft written to:\n{out_path.name}\n\nOpen it now?",
+            ):
+                open_file(out_path)
+
+        def on_error(exc):
+            messagebox.showerror("Draft export failed", str(exc))
+
+        self._run_async(work, on_done, on_error)
+
+    def _finalize_from_editor(self):
+        """Editor's Finalize button → the existing generation flow (which still
+        escalates conflicts/topology via the modal dialogs)."""
+        if not self.session:
+            return
+        if self.editor and self.editor.dirty and messagebox.askyesno(
+            "Save project?", "Save the project before generating?",
+        ):
+            self.editor.save()
+        sync_master_zones(self.session.design)
+        self.editor_section.grid_remove()
+        self._start_generating_dmp()
+
+    def _back_to_editor(self):
+        """Return to the editor after a failed/aborted generation."""
+        self.state = "editing"
+        self.action_section.grid_remove()
+        if self.editor:
+            self.editor_section.grid(row=1, column=0, sticky="ew", padx=24, pady=(12, 0))
+        elif self.session:
+            self._enter_editor(self.session)
+
+    def _charts_from_worksheet(self):
+        """Quick path for imported worksheets: door charts from the file as-is,
+        ignoring any unsaved editor changes (the file on disk is the input)."""
+        if self.editor and not self.editor.maybe_close():
+            return
+        self.editor_section.grid_remove()
+        self._start_generating_chart()
 
     # ------------------------------------------------------------------ #
     # Flow: generate DMP                                                    #
@@ -999,6 +1129,8 @@ class App:
             for s, menus in rows:
                 s.outputs = [m.get() for m in menus]
             self._topology_confirmed = True
+            if self.session:
+                self.session.topology_confirmed = True
             win.grab_release()
             win.destroy()
             on_resolved()
@@ -1022,25 +1154,15 @@ class App:
             self._show_topology_dialog(self.parsed_design, self._start_generating_dmp)
             return
 
-        entries = self._meta_entries
-        school_code    = entries["school_code"].get().strip()
-        phone          = entries["phone"].get().strip()
-        install_tech   = entries["install_tech"].get().strip()
-        install_date   = entries["install_date"].get().strip()
-        ip_address     = entries["ip_address"].get().strip()
-        default_gw     = entries["default_gateway"].get().strip()
-
-        save_prefs({**load_prefs(), "phone": phone, "install_tech": install_tech,
-                    "install_date": install_date, "ip_address": ip_address,
-                    "default_gateway": default_gw})
-
+        # Job details now live on the design itself (written through by the
+        # editor's SITE tab). Persist the per-machine ones as defaults.
         design = self.parsed_design
-        if school_code:   design.site_info.school_code    = school_code
-        if phone:         design.site_info.phone          = phone
-        if install_tech:  design.site_info.install_tech   = install_tech
-        if install_date:  design.site_info.install_date   = install_date
-        if ip_address:    design.site_info.ip_address     = ip_address
-        if default_gw:    design.site_info.default_gateway = default_gw
+        save_prefs({**load_prefs(),
+                    "phone": design.site_info.phone or "",
+                    "install_tech": design.site_info.install_tech or "",
+                    "install_date": design.site_info.install_date or "",
+                    "ip_address": design.site_info.ip_address or "",
+                    "default_gateway": design.site_info.default_gateway or ""})
 
         self.state = "generating_dmp"
         self._anim_done = False
@@ -1086,8 +1208,7 @@ class App:
             if self.state != "generating_dmp":
                 return
             self._pipe_error = exc
-            self.state = "parsed"
-            self._show_action_error("DMP generation failed", exc, self._show_action_idle)
+            self._show_action_error("DMP generation failed", exc, self._back_to_editor)
 
         self._run_async(work, on_done, on_error)
 
@@ -1176,14 +1297,16 @@ class App:
     # ------------------------------------------------------------------ #
 
     def _process_another(self):
+        if self.editor and not self.editor.maybe_close():
+            return
         self.pdf_path = None
         self.dmp_path = None
         self.door_chart_path = None
         self.parsed_design = None
+        self.session = None
         self.state = "idle"
         self._stop_spinners()
-        # Form values intentionally preserved — _meta_entries left intact
-        self.meta_section.grid_remove()
+        self._teardown_editor()
         self.action_section.grid_remove()
         self._show_drop_zone()
 
@@ -1215,8 +1338,10 @@ class App:
         if self.state in ("generating_dmp", "generating_chart"):
             if messagebox.askyesno("Quit?", "Generation in progress — quit anyway?"):
                 self.root.destroy()
-        else:
-            self.root.destroy()
+            return
+        if self.state == "editing" and self.editor and not self.editor.maybe_close():
+            return
+        self.root.destroy()
 
     def run(self):
         self.root.mainloop()
