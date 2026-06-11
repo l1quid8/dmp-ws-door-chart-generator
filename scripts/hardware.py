@@ -61,6 +61,15 @@ def next_expander_number(design: DMPDesign) -> int:
     return n
 
 
+def block_orphans(design: DMPDesign, number: int) -> list[ZoneInfo]:
+    """Existing ZoneInfo entries inside module `number`'s address block that no
+    RSP owns. Real worksheets carry these (stray SPARE/PS rows on the Master
+    sheet beyond the installed expanders); adding an expander replaces them,
+    so the UI warns first when any holds a non-SPARE description."""
+    block = set(zone_block_for(number))
+    return [z for z in design.zones if z.number in block]
+
+
 def add_expander(design: DMPDesign, model: str, location: str | None = None) -> RSP:
     if model not in EXPANDER_MODELS:
         raise HardwareError(f"Unknown expander model: {model}")
@@ -78,6 +87,12 @@ def add_expander(design: DMPDesign, model: str, location: str | None = None) -> 
     number = next_expander_number(design)
     points = EXPANDER_MODELS[model]
     block = list(zone_block_for(number))[:points]
+
+    # Absorb orphan zone rows already sitting in this block (stray SPARE/PS
+    # rows parsed from the Master sheet) — duplicates would corrupt the zone
+    # grid and the Master write. The number is free, so no RSP owns them.
+    full_block = set(zone_block_for(number))
+    design.zones = [z for z in design.zones if z.number not in full_block]
 
     rsp = RSP(number=number, location=location, zones=block, model=model)
     design.rsps.append(rsp)

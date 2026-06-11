@@ -135,6 +135,10 @@ class App:
         self._show_drop_zone()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Tk swallows exceptions raised inside widget callbacks, which reads
+        # as "the button does nothing". Surface them instead.
+        self.root.report_callback_exception = self._on_ui_exception
+
         # Manual-save shortcut (active only while the editor is open).
         shortcut = "<Command-s>" if sys.platform == "darwin" else "<Control-s>"
         self.root.bind_all(shortcut, self._save_shortcut)
@@ -255,9 +259,10 @@ class App:
 
         self._open_btn = tool_btn("Open…", self._choose_pdf, col=3)
         self._save_btn = tool_btn("Save", self._save_shortcut, col=4)
-        self._draft_btn = tool_btn("Export Draft", self._export_draft, col=5)
+        self._revert_btn = tool_btn("Revert…", self._revert_clicked, col=5)
+        self._draft_btn = tool_btn("Export Draft", self._export_draft, col=6)
         self._finalize_btn = tool_btn("Finalize…", self._finalize_clicked,
-                                      filled=True, col=6)
+                                      filled=True, col=7)
         self._set_toolbar_enabled(False)
 
     def _build_statusbar(self):
@@ -319,6 +324,9 @@ class App:
         state = "normal" if editing else "disabled"
         for btn in (self._save_btn, self._draft_btn, self._finalize_btn):
             btn.configure(state=state)
+        # Revert needs a saved file to go back to.
+        can_revert = editing and self.session is not None and self.session.path
+        self._revert_btn.configure(state="normal" if can_revert else "disabled")
 
     def _set_project_title(self, text: str | None, dirty: bool = False):
         if text:
@@ -335,6 +343,29 @@ class App:
         if self.session:
             school = self.session.design.site_info.school_name or "Untitled project"
         self._set_project_title(school, dirty)
+        # The first save creates session.path, which enables Revert.
+        self._set_toolbar_enabled(self.state == "editing")
+
+    def _revert_clicked(self):
+        """Discard in-memory changes and reload the session from disk."""
+        if self.state != "editing" or not self.session or not self.session.path:
+            return
+        school = self.session.design.site_info.school_name or "this project"
+        when = (self.session.saved_at or "")[:16].replace("T", " ")
+        if not messagebox.askyesno(
+            "Revert to last save?",
+            f"Discard all changes to {school} since the last save"
+            + (f" ({when})" if when else "") + "?\n\nThis cannot be undone.",
+        ):
+            return
+        path = self.session.path
+        try:
+            clear_recovery(path)
+            fresh = load_session(path)
+        except SessionLoadError as exc:
+            messagebox.showerror("Couldn't revert", str(exc))
+            return
+        self._enter_editor(fresh)
 
     def _on_editor_validation(self, text: str, ok: bool):
         self._issues_lbl.configure(text=text,
@@ -1085,6 +1116,21 @@ class App:
     def _save_shortcut(self, _event=None):
         if self.state == "editing" and self.editor:
             self.editor.save()
+
+    def _on_ui_exception(self, exc_type, exc, tb):
+        import traceback as _tb
+        detail = "".join(_tb.format_exception(exc_type, exc, tb))
+        with contextlib.suppress(Exception):
+            self._redirector.write(f"\n=== UI error ===\n{detail}")
+        with contextlib.suppress(Exception):
+            with open(output_dir() / "debug.log", "a", encoding="utf-8") as fh:
+                fh.write(f"\n=== UI error ===\n{detail}")
+        messagebox.showerror(
+            "Unexpected error",
+            f"Something went wrong in the interface:\n\n{exc}\n\n"
+            "Your project data is unaffected — save it, then check the "
+            "terminal panel for details.",
+        )
 
     def _export_draft(self):
         """Write a DRAFT-stamped worksheet from the current in-memory design."""

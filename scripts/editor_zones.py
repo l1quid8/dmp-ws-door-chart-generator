@@ -138,13 +138,23 @@ class ZonesTab(ctk.CTkFrame):
                 exp_map.get(zi.number, ""))
 
     def refresh(self):
-        """Rebuild all rows from design.zones (item id == zone number)."""
+        """Rebuild all rows from design.zones (item id == zone number).
+
+        Deletion must go through the tracked iid list — rows hidden by the
+        search/filter are *detached*, so tree.get_children() misses them and
+        a rebuild would collide on re-insert ("Item already exists").
+        """
         self._cancel_edit()
-        self.tree.delete(*self.tree.get_children())
+        for iid in getattr(self, "_all_iids", []):
+            if self.tree.exists(iid):
+                self.tree.delete(iid)
+        self._all_iids: list[str] = []
         exp_map = self._zone_to_expander()
         for zi in sorted(self.design.zones, key=lambda z: z.number):
-            self.tree.insert("", "end", iid=str(zi.number),
+            iid = str(zi.number)
+            self.tree.insert("", "end", iid=iid,
                              values=self._values_for(zi, exp_map))
+            self._all_iids.append(iid)
         self._retag_errors()
         self._apply_filter()
 
@@ -159,8 +169,11 @@ class ZonesTab(ctk.CTkFrame):
         self._retag_errors()
 
     def _retag_errors(self):
-        for iid in self.tree.get_children(""):
-            self.tree.item(iid, tags=("error",) if int(iid) in self._error_zones else ())
+        # Walk the tracked iids, not get_children — detached (filtered-out)
+        # rows must keep their tags current too.
+        for iid in getattr(self, "_all_iids", []):
+            if self.tree.exists(iid):
+                self.tree.item(iid, tags=("error",) if int(iid) in self._error_zones else ())
 
     def select_zone(self, number: int):
         """Scroll to and select a zone row (used by 'Go to' in the finalize gate)."""

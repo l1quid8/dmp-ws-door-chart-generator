@@ -33,6 +33,7 @@ from hardware import (  # noqa: E402
     add_expander,
     add_keypad,
     add_splitter,
+    block_orphans,
     next_expander_number,
     remove_expander,
     remove_keypad,
@@ -190,6 +191,27 @@ def test_remove_keypad_scrubs_outputs():
     remove_keypad(d, 3)
     assert d.keypads == []
     assert d.splitters[0].outputs == ["Spare", "Spare", "Spare"]
+
+
+def test_add_expander_absorbs_orphan_block_zones():
+    """Real worksheets carry stray SPARE/PS zone rows beyond the installed
+    expanders (DARBY has 47). Adding an expander into such a block must
+    replace them — duplicates corrupt the zone grid and Master write."""
+    d = _design_with_expanders(1)
+    # Orphans sitting in module 2's block (Z517-532), owned by no RSP
+    d.zones.append(ZoneInfo(number=517, location="SPARE", device_type="Spare", partition=1))
+    d.zones.append(ZoneInfo(number=531, location="OLD STORAGE", device_type="Motion", partition=1))
+
+    orphans = block_orphans(d, 2)
+    assert {z.number for z in orphans} == {517, 531}
+
+    rsp = add_expander(d, "714-16")
+    assert rsp.number == 2
+    numbers = [z.number for z in d.zones]
+    assert len(numbers) == len(set(numbers)), "duplicate zone numbers"
+    by_num = {z.number: z for z in d.zones}
+    assert by_num[517].location == "SPARE"          # fresh row, not the orphan
+    assert by_num[531].location == "PS-2: A/C LOSS"  # orphan replaced
 
 
 def test_add_expander_materializes_zones_from_master():
