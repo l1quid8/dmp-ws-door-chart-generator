@@ -17,8 +17,9 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
-from session import Session, save_session, write_recovery, clear_recovery
+from session import Session, save_session, sync_master_zones, write_recovery, clear_recovery
 from validation import validate_design, badge_counts
+from editor_zones import ZonesTab
 
 ACCENT = "#4a7bb8"
 ACCENT_HOVER = "#3a6aa8"
@@ -154,9 +155,22 @@ class EditorFrame(ctk.CTkFrame):
         self.tabs.grid(row=1, column=0, sticky="nsew")
         for title in TAB_TITLES:
             self.tabs.add(title)
+        self.tabs.set("ZONES")  # the common field-correction surface lands first
         self._build_site_tab(self.tabs.tab("SITE"))
-        for title in TAB_TITLES[1:]:
+
+        zones_tab = self.tabs.tab("ZONES")
+        zones_tab.columnconfigure(0, weight=1)
+        zones_tab.rowconfigure(0, weight=1)
+        self.zones = ZonesTab(zones_tab, self.session.design, self._on_zones_edit)
+        self.zones.grid(row=0, column=0, sticky="nsew")
+
+        for title in TAB_TITLES[2:]:
             self._build_placeholder_tab(self.tabs.tab(title), title)
+
+    def _on_zones_edit(self):
+        sync_master_zones(self.session.design)
+        self.mark_dirty()
+        self.refresh_validation()
 
     def _build_placeholder_tab(self, tab, title: str):
         tab.columnconfigure(0, weight=1)
@@ -209,6 +223,13 @@ class EditorFrame(ctk.CTkFrame):
         self._issues_lbl.configure(
             text=text, text_color="#c05621" if counts else "#2f855a",
         )
+        if hasattr(self, "zones"):
+            error_zones = set()
+            for issue in issues:
+                if issue.severity == "error" and (issue.ref or "").startswith("zone:"):
+                    error_zones.add(int(issue.ref.split(":", 1)[1]))
+            self.zones.set_error_zones(error_zones)
+        return issues
 
     # ------------------------------------------------------------------ #
     # SITE tab                                                              #
