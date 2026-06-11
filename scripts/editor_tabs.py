@@ -29,7 +29,7 @@ class SplittersTab(ctk.CTkFrame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent", height=330)
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.body.grid(row=0, column=0, sticky="nsew")
         self.body.columnconfigure(0, weight=1)
         self.refresh()
@@ -192,7 +192,7 @@ class KeypadsTab(ctk.CTkFrame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        body = ctk.CTkScrollableFrame(self, fg_color="transparent", height=330)
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.grid(row=0, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
 
@@ -253,7 +253,7 @@ class PowerTab(ctk.CTkFrame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        body = ctk.CTkScrollableFrame(self, fg_color="transparent", height=330)
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.grid(row=0, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
 

@@ -7,6 +7,14 @@ One codebase runs on both operating systems — platform differences are handled
 at runtime via `sys.platform` checks. The app is built into a native `.app`
 (macOS) or a one-folder app — a folder holding the `.exe` (Windows).
 
+## Application shell (v1.2)
+
+Landscape window (1000×680) with desktop-app chrome: a slim toolbar (brand
+mark, project name with unsaved-changes dot, Open / Save / Export Draft /
+Finalize), the editor filling the window, and a status bar (save state,
+validation chips, collapsible terminal). The full ConvergeOne logo appears
+only on the home screen.
+
 ## Field-edit workflow (v1.1)
 
 The app is the working document; the Excel files are output artifacts.

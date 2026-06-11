@@ -94,9 +94,11 @@ class ZonesTab(ctk.CTkFrame):
                   background=[("selected", ACCENT)],
                   foreground=[("selected", "white")])
 
+        # height is a minimum request; the sticky+weight grid stretches the
+        # tree to fill whatever the window gives it.
         self.tree = ttk.Treeview(
             holder, columns=COLUMNS, show="headings",
-            style="Zones.Treeview", selectmode="browse", height=11,
+            style="Zones.Treeview", selectmode="browse", height=12,
         )
         for col in COLUMNS:
             self.tree.heading(col, text=HEADINGS[col])

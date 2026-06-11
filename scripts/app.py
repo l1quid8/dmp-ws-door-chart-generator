@@ -103,7 +103,8 @@ class App:
         self.root = ctk.CTk()
         _version = _app_version()
         self.root.title("DMP WS & Door Chart Generator" + (f"  v{_version}" if _version else ""))
-        self.root.geometry("600x700")
+        self.root.geometry("1000x680")
+        self.root.minsize(860, 560)
         self.root.resizable(True, True)
 
         # Windows title-bar icon (distinct from the .exe's embedded icon by design).
@@ -150,93 +151,201 @@ class App:
     # ------------------------------------------------------------------ #
 
     def _build_layout(self):
+        """Application chrome: toolbar / main / collapsible terminal / status bar.
+
+        The main area swaps between two surfaces: a centered scrollable "flow"
+        column (home, parsing, generation progress, review/done screens) and
+        the full-bleed project editor.
+        """
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(1, weight=1)
+        self.root.rowconfigure(2, weight=1)
 
-        # Header — auto-sizes to fit logo + subtitle
-        header = ctk.CTkFrame(self.root, fg_color=("gray95", "gray15"), corner_radius=0)
-        header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(0, weight=1)
+        self._build_toolbar()
 
-        logo_path = resource_path("logos/ConvergeOne_logo.png")
-        try:
-            from PIL import Image as _PILImage
-            pil_img = _PILImage.open(logo_path)
-            self._logo_img = ctk.CTkImage(light_image=pil_img, size=(160, 71))
-            ctk.CTkLabel(header, image=self._logo_img, text="").grid(row=0, column=0, pady=(14, 2))
-        except Exception:
-            ctk.CTkLabel(header, text="ConvergeOne", font=ctk.CTkFont(size=20, weight="bold"),
-                         text_color=ACCENT).grid(row=0, column=0, pady=(14, 2))
+        ctk.CTkFrame(self.root, height=1, corner_radius=0,
+                     fg_color=("gray80", "gray28")).grid(row=1, column=0, sticky="ew")
 
-        ctk.CTkLabel(
-            header,
-            text="DMP WS & Door Chart Generator",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color="gray40",
-        ).grid(row=1, column=0, pady=(0, 14))
+        # Main area
+        self.main = ctk.CTkFrame(self.root, fg_color="transparent")
+        self.main.grid(row=2, column=0, sticky="nsew")
+        self.main.columnconfigure(0, weight=1)
+        self.main.rowconfigure(0, weight=1)
 
-        # Scrollable content area
-        self.content = ctk.CTkScrollableFrame(self.root, fg_color="transparent")
-        self.content.grid(row=1, column=0, sticky="nsew")
-        self.content.columnconfigure(0, weight=1)
+        # Centered flow column (home / progress / review screens). Fixed width
+        # keeps cards readable in a wide window; sticky ns centers it.
+        self.flow = ctk.CTkScrollableFrame(self.main, fg_color="transparent", width=560)
+        self.flow.grid(row=0, column=0, sticky="ns")
+        self.flow.columnconfigure(0, weight=1)
 
-        # Section 1 — input (always visible)
-        self.input_section = ctk.CTkFrame(self.content, fg_color="transparent")
-        self.input_section.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 0))
+        self.input_section = ctk.CTkFrame(self.flow, fg_color="transparent")
+        self.input_section.grid(row=0, column=0, sticky="ew", pady=(16, 0))
         self.input_section.columnconfigure(0, weight=1)
 
-        # Section 2 — project editor host (hidden until a project is open)
-        self.editor_section = ctk.CTkFrame(self.content, fg_color="transparent")
-        self.editor_section.columnconfigure(0, weight=1)
-
-        # Section 3 — action region (hidden until parsed)
-        self.action_section = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.action_section = ctk.CTkFrame(self.flow, fg_color="transparent")
         self.action_section.columnconfigure(0, weight=1)
 
-        # Terminal panel (hidden by default — not gridded until toggled)
-        self.term_section = ctk.CTkFrame(self.content, fg_color="transparent")
+        # Full-bleed editor host (gridded when a project is open)
+        self.editor_section = ctk.CTkFrame(self.main, fg_color="transparent")
+        self.editor_section.columnconfigure(0, weight=1)
+        self.editor_section.rowconfigure(0, weight=1)
+
+        # Collapsible terminal panel
+        self.term_section = ctk.CTkFrame(self.root, fg_color="transparent")
         self.term_section.columnconfigure(0, weight=1)
         self._term_visible = False
         self._build_terminal()
 
-        # Footer with terminal toggle
-        footer = ctk.CTkFrame(self.root, fg_color="transparent", height=36)
-        footer.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
-        footer.columnconfigure(0, weight=1)
+        ctk.CTkFrame(self.root, height=1, corner_radius=0,
+                     fg_color=("gray80", "gray28")).grid(row=4, column=0, sticky="ew")
+        self._build_statusbar()
+
+    def _build_toolbar(self):
+        bar = ctk.CTkFrame(self.root, fg_color=("gray95", "gray15"),
+                           corner_radius=0, height=46)
+        bar.grid(row=0, column=0, sticky="ew")
+        bar.grid_propagate(False)
+        bar.columnconfigure(2, weight=1)
+
+        # Small brand mark (full logo lives on the home view only)
+        logo_path = resource_path("logos/ConvergeOne_logo.png")
+        try:
+            from PIL import Image as _PILImage
+            pil_img = _PILImage.open(logo_path)
+            w, h = pil_img.size
+            mark_h = 22
+            self._toolbar_logo = ctk.CTkImage(light_image=pil_img,
+                                              size=(int(mark_h * w / h), mark_h))
+            ctk.CTkLabel(bar, image=self._toolbar_logo, text="").grid(
+                row=0, column=0, padx=(14, 10), pady=12)
+        except Exception:
+            ctk.CTkLabel(bar, text="C1", font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=ACCENT).grid(row=0, column=0, padx=(14, 10))
+
+        ctk.CTkFrame(bar, width=1, height=22,
+                     fg_color=("gray80", "gray28")).grid(row=0, column=1)
+
+        title_cell = ctk.CTkFrame(bar, fg_color="transparent")
+        title_cell.grid(row=0, column=2, sticky="w", padx=(12, 0))
+        self._title_lbl = ctk.CTkLabel(
+            title_cell, text="No project open",
+            font=ctk.CTkFont(size=13, weight="bold"), text_color="gray45",
+            anchor="w",
+        )
+        self._title_lbl.pack(side="left")
+        self._dirty_lbl = ctk.CTkLabel(
+            title_cell, text="", width=16,
+            font=ctk.CTkFont(size=13, weight="bold"), text_color="#c05621",
+        )
+        self._dirty_lbl.pack(side="left")
+
+        def tool_btn(text, command, *, filled=False, col=0):
+            kwargs = dict(height=30, command=command,
+                          font=ctk.CTkFont(size=12, weight="bold" if filled else "normal"))
+            if filled:
+                kwargs.update(fg_color=ACCENT, hover_color=ACCENT_HOVER, width=96)
+            else:
+                kwargs.update(fg_color="transparent", border_width=1,
+                              border_color="gray60", text_color=("gray25", "gray85"),
+                              hover_color=("gray90", "gray25"), width=72)
+            btn = ctk.CTkButton(bar, text=text, **kwargs)
+            btn.grid(row=0, column=col, padx=(0, 8), pady=8)
+            return btn
+
+        self._open_btn = tool_btn("Open…", self._choose_pdf, col=3)
+        self._save_btn = tool_btn("Save", self._save_shortcut, col=4)
+        self._draft_btn = tool_btn("Export Draft", self._export_draft, col=5)
+        self._finalize_btn = tool_btn("Finalize…", self._finalize_clicked,
+                                      filled=True, col=6)
+        self._set_toolbar_enabled(False)
+
+    def _build_statusbar(self):
+        bar = ctk.CTkFrame(self.root, fg_color=("gray97", "gray13"),
+                           corner_radius=0, height=28)
+        bar.grid(row=5, column=0, sticky="ew")
+        bar.grid_propagate(False)
+        bar.columnconfigure(2, weight=1)
+
+        self._status_lbl = ctk.CTkLabel(bar, text="Ready",
+                                        font=ctk.CTkFont(size=11),
+                                        text_color="gray50", anchor="w")
+        self._status_lbl.grid(row=0, column=0, sticky="w", padx=(14, 12))
+
+        self._source_lbl = ctk.CTkLabel(bar, text="", font=ctk.CTkFont(size=11),
+                                        text_color="gray60", anchor="w")
+        self._source_lbl.grid(row=0, column=1, sticky="w")
+
+        self._issues_lbl = ctk.CTkLabel(bar, text="", font=ctk.CTkFont(size=11),
+                                        text_color="#c05621", anchor="e")
+        self._issues_lbl.grid(row=0, column=3, sticky="e", padx=(0, 12))
+
         self._term_btn = ctk.CTkButton(
-            footer,
-            text="▷ Show terminal",
-            width=130,
-            height=26,
-            fg_color="transparent",
-            text_color=ACCENT,
-            hover_color=("gray90", "gray25"),
-            border_width=0,
+            bar, text="▷ terminal", width=84, height=20,
+            fg_color="transparent", text_color=ACCENT,
+            hover_color=("gray90", "gray25"), border_width=0,
+            font=ctk.CTkFont(size=11),
             command=self._toggle_terminal,
         )
-        self._term_btn.grid(row=0, column=1, sticky="e")
+        self._term_btn.grid(row=0, column=4, sticky="e", padx=(0, 10))
 
     def _build_terminal(self):
         self.term_text = ctk.CTkTextbox(
             self.term_section,
-            height=220,
+            height=200,
             font=ctk.CTkFont(family="Courier", size=11),
             fg_color="#1e1e1e",
             text_color="#d4d4d4",
             state="disabled",
             wrap="word",
         )
-        self.term_text.grid(row=0, column=0, sticky="ew", pady=(8, 0))
+        self.term_text.grid(row=0, column=0, sticky="ew", padx=10, pady=(6, 6))
         self._redirector = TextRedirector(self.term_text, self.root)
 
     def _toggle_terminal(self):
         self._term_visible = not self._term_visible
         if self._term_visible:
-            self.term_section.grid(row=10, column=0, sticky="ew", padx=24, pady=(8, 16))
-            self._term_btn.configure(text="▽ Hide terminal")
+            self.term_section.grid(row=3, column=0, sticky="ew")
+            self._term_btn.configure(text="▽ terminal")
         else:
             self.term_section.grid_remove()
-            self._term_btn.configure(text="▷ Show terminal")
+            self._term_btn.configure(text="▷ terminal")
+
+    # ------------------------------------------------------------------ #
+    # Chrome state                                                          #
+    # ------------------------------------------------------------------ #
+
+    def _set_toolbar_enabled(self, editing: bool):
+        state = "normal" if editing else "disabled"
+        for btn in (self._save_btn, self._draft_btn, self._finalize_btn):
+            btn.configure(state=state)
+
+    def _set_project_title(self, text: str | None, dirty: bool = False):
+        if text:
+            self._title_lbl.configure(text=text, text_color=("gray15", "gray90"))
+        else:
+            self._title_lbl.configure(text="No project open", text_color="gray45")
+        self._dirty_lbl.configure(text="●" if dirty else "")
+
+    def _on_editor_status(self, text: str, dirty: bool):
+        """EditorFrame save-state callback → status bar + toolbar title."""
+        self._status_lbl.configure(
+            text=text, text_color="#c05621" if dirty else "gray50")
+        school = ""
+        if self.session:
+            school = self.session.design.site_info.school_name or "Untitled project"
+        self._set_project_title(school, dirty)
+
+    def _on_editor_validation(self, text: str, ok: bool):
+        self._issues_lbl.configure(text=text,
+                                   text_color="#2f855a" if ok else "#c05621")
+
+    def _show_flow(self):
+        """Show the centered flow column (and hide the editor surface)."""
+        self.editor_section.grid_remove()
+        self.flow.grid(row=0, column=0, sticky="ns")
+
+    def _finalize_clicked(self):
+        if self.state == "editing" and self.editor:
+            self.editor.show_finalize_dialog()
 
     # ------------------------------------------------------------------ #
     # Section 1 — Input                                                     #
@@ -245,9 +354,26 @@ class App:
     def _clear_input_section(self):
         for w in self.input_section.winfo_children():
             w.destroy()
+        self._show_flow()
 
     def _show_drop_zone(self):
         self._clear_input_section()
+        self._show_flow()
+        self._set_project_title(None)
+        self._status_lbl.configure(text="Ready", text_color="gray50")
+        self._source_lbl.configure(text="")
+        self._issues_lbl.configure(text="")
+
+        # Full brand logo lives here, on the welcome surface only.
+        logo_path = resource_path("logos/ConvergeOne_logo.png")
+        try:
+            from PIL import Image as _PILImage
+            pil_img = _PILImage.open(logo_path)
+            self._home_logo = ctk.CTkImage(light_image=pil_img, size=(140, 62))
+            ctk.CTkLabel(self.input_section, image=self._home_logo, text="").grid(
+                row=0, column=0, pady=(4, 14))
+        except Exception:
+            pass
 
         dz = ctk.CTkFrame(
             self.input_section,
@@ -257,7 +383,7 @@ class App:
             fg_color=("gray97", "gray20"),
             height=140,
         )
-        dz.grid(row=0, column=0, sticky="ew")
+        dz.grid(row=1, column=0, sticky="ew")
         dz.columnconfigure(0, weight=1)
         dz.grid_propagate(False)
 
@@ -289,7 +415,7 @@ class App:
         # Output-folder picker lives on the home screen now that the old
         # job-details form (its previous host) is gone.
         row = ctk.CTkFrame(self.input_section, fg_color="transparent")
-        row.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        row.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         row.columnconfigure(1, weight=1)
         ctk.CTkLabel(row, text="Save output to:", font=ctk.CTkFont(size=11),
                      text_color="gray50").grid(row=0, column=0, sticky="w")
@@ -311,7 +437,7 @@ class App:
             return
 
         frame = ctk.CTkFrame(self.input_section, fg_color="transparent")
-        frame.grid(row=1, column=0, sticky="ew", pady=(16, 0))
+        frame.grid(row=2, column=0, sticky="ew", pady=(16, 0))
         frame.columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
@@ -447,7 +573,8 @@ class App:
     def _clear_action_section(self):
         for w in self.action_section.winfo_children():
             w.destroy()
-        self.action_section.grid(row=2, column=0, sticky="ew", padx=24, pady=(16, 0))
+        self._show_flow()
+        self.action_section.grid(row=1, column=0, sticky="ew", pady=(16, 0))
 
     def _show_action_generating_dmp(self, steps: list[str]):
         self._clear_action_section()
@@ -760,6 +887,9 @@ class App:
         DMP worksheet, anything else takes the PDF parse pipeline."""
         if self.editor and not self.editor.maybe_close():
             return
+        # One project at a time: opening a new input closes the current one.
+        self._teardown_editor()
+        self.session = None
         suffix = path.suffix.lower()
         if suffix == SESSION_EXT:
             self._open_session_path(path)
@@ -892,8 +1022,9 @@ class App:
         self._teardown_editor()
         self.editor = EditorFrame(
             self.editor_section, self.root, session,
-            on_export_draft=self._export_draft,
             on_finalize=self._finalize_from_editor,
+            on_status_change=self._on_editor_status,
+            on_validation_change=self._on_editor_validation,
             on_generate_charts=(self._charts_from_worksheet
                                 if session.source_kind == "xlsx" else None),
         )
@@ -901,14 +1032,27 @@ class App:
         if session.saved_at is None:
             # Fresh parse: seed the per-machine defaults the old form offered.
             self.editor.prefill_site_defaults(load_prefs())
-        self.editor_section.grid(row=1, column=0, sticky="ew", padx=24, pady=(12, 0))
+        self._show_editor_surface()
+        self._set_toolbar_enabled(True)
+        if session.source_name:
+            self._source_lbl.configure(text=f"from {session.source_name}")
+
+    def _show_editor_surface(self):
+        """Full-bleed editor; flow column hidden."""
+        self.flow.grid_remove()
         self.action_section.grid_remove()
+        self.editor_section.grid(row=0, column=0, sticky="nsew",
+                                 padx=14, pady=(10, 8))
 
     def _teardown_editor(self):
         if self.editor is not None:
             self.editor.destroy()
             self.editor = None
         self.editor_section.grid_remove()
+        self._set_toolbar_enabled(False)
+        self._set_project_title(None)
+        self._source_lbl.configure(text="")
+        self._issues_lbl.configure(text="")
 
     def _open_session_path(self, path: Path):
         """Open a saved .dmps project, offering crash recovery when present."""
@@ -984,7 +1128,7 @@ class App:
         ):
             self.editor.save()
         sync_master_zones(self.session.design)
-        self.editor_section.grid_remove()
+        self._set_toolbar_enabled(False)
         self._start_generating_dmp()
 
     def _back_to_editor(self):
@@ -992,7 +1136,8 @@ class App:
         self.state = "editing"
         self.action_section.grid_remove()
         if self.editor:
-            self.editor_section.grid(row=1, column=0, sticky="ew", padx=24, pady=(12, 0))
+            self._show_editor_surface()
+            self._set_toolbar_enabled(True)
         elif self.session:
             self._enter_editor(self.session)
 
@@ -1001,7 +1146,7 @@ class App:
         ignoring any unsaved editor changes (the file on disk is the input)."""
         if self.editor and not self.editor.maybe_close():
             return
-        self.editor_section.grid_remove()
+        self._set_toolbar_enabled(False)
         self._start_generating_chart()
 
     # ------------------------------------------------------------------ #
