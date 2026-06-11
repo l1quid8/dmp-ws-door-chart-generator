@@ -171,11 +171,13 @@ class App:
         self.main.columnconfigure(0, weight=1)
         self.main.rowconfigure(0, weight=1)
 
-        # Centered flow column (home / progress / review screens). Fixed width
-        # keeps cards readable in a wide window; sticky ns centers it.
-        self.flow = ctk.CTkScrollableFrame(self.main, fg_color="transparent", width=560)
-        self.flow.grid(row=0, column=0, sticky="ns")
-        self.flow.columnconfigure(0, weight=1)
+        # Centered flow column (home / progress / review screens). A plain
+        # frame — content is small and fixed, and CTkScrollableFrame's
+        # always-visible scrollbar trough reads as an empty panel. Top-anchored
+        # via sticky n; main's weight-1 column centers it horizontally.
+        self.flow = ctk.CTkFrame(self.main, fg_color="transparent")
+        self.flow.grid(row=0, column=0, sticky="n")
+        self.flow.columnconfigure(0, weight=1, minsize=560)
 
         self.input_section = ctk.CTkFrame(self.flow, fg_color="transparent")
         self.input_section.grid(row=0, column=0, sticky="ew", pady=(16, 0))
@@ -341,7 +343,7 @@ class App:
     def _show_flow(self):
         """Show the centered flow column (and hide the editor surface)."""
         self.editor_section.grid_remove()
-        self.flow.grid(row=0, column=0, sticky="ns")
+        self.flow.grid(row=0, column=0, sticky="n")
 
     def _finalize_clicked(self):
         if self.state == "editing" and self.editor:
@@ -432,7 +434,7 @@ class App:
         ).grid(row=0, column=2, padx=(8, 0))
 
     def _show_recent_projects(self):
-        recents = list_recent_sessions(limit=5)
+        recents = list_recent_sessions(limit=4)
         if not recents:
             return
 

@@ -21,6 +21,28 @@ ACCENT_HOVER = "#3a6aa8"
 BANNER_BG = "#fdf3e7"
 
 
+def auto_hide_scrollbar(scrollframe: ctk.CTkScrollableFrame) -> None:
+    """Show a CTkScrollableFrame's scrollbar only when its content overflows.
+
+    CustomTkinter renders the scrollbar trough permanently; on a roomy window
+    an un-scrollable panel reads as a random empty toolbar.
+    """
+    scrollbar = scrollframe._scrollbar
+    canvas = scrollframe._parent_canvas
+
+    def update(_event=None):
+        fits = scrollframe.winfo_reqheight() <= canvas.winfo_height() + 1
+        managed = bool(scrollbar.winfo_manager())
+        if fits and managed:
+            scrollbar.grid_remove()
+        elif not fits and not managed:
+            scrollbar.grid()
+
+    scrollframe.bind("<Configure>", update, add="+")
+    canvas.bind("<Configure>", update, add="+")
+    update()
+
+
 class SplittersTab(ctk.CTkFrame):
     def __init__(self, master, session: Session, on_change):
         super().__init__(master, fg_color="transparent")
@@ -32,6 +54,7 @@ class SplittersTab(ctk.CTkFrame):
         self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.body.grid(row=0, column=0, sticky="nsew")
         self.body.columnconfigure(0, weight=1)
+        auto_hide_scrollbar(self.body)
         self.refresh()
 
     def refresh(self):
@@ -195,6 +218,7 @@ class KeypadsTab(ctk.CTkFrame):
         body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.grid(row=0, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
+        auto_hide_scrollbar(body)
 
         keypads = self.session.design.keypads
         if not keypads:
@@ -256,6 +280,7 @@ class PowerTab(ctk.CTkFrame):
         body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.grid(row=0, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
+        auto_hide_scrollbar(body)
 
         design = self.session.design
         ps_by_number = {ps.number: ps for ps in design.power_supplies}

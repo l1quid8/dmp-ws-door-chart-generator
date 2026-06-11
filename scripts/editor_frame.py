@@ -22,7 +22,7 @@ import customtkinter as ctk
 from session import Session, save_session, sync_master_zones, write_recovery, clear_recovery
 from validation import validate_design, badge_counts
 from editor_zones import ZonesTab
-from editor_tabs import SplittersTab, KeypadsTab, PowerTab
+from editor_tabs import SplittersTab, KeypadsTab, PowerTab, auto_hide_scrollbar
 
 ACCENT = "#4a7bb8"
 ACCENT_HOVER = "#3a6aa8"
@@ -212,6 +212,7 @@ class EditorFrame(ctk.CTkFrame):
         body = ctk.CTkScrollableFrame(win, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=12, pady=4)
         body.columnconfigure(0, weight=1)
+        auto_hide_scrollbar(body)
 
         row = 0
         by_tab: dict[str, list] = {}
