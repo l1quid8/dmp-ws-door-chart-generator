@@ -143,6 +143,14 @@ class App:
         shortcut = "<Command-s>" if sys.platform == "darwin" else "<Control-s>"
         self.root.bind_all(shortcut, self._save_shortcut)
 
+        # Menu-bar shortcuts (mirror File + Worksheet). Handlers self-guard.
+        mod = "Command" if sys.platform == "darwin" else "Control"
+        self.root.bind_all(f"<{mod}-n>", lambda _e=None: self._process_another())
+        self.root.bind_all(f"<{mod}-o>", lambda _e=None: self._choose_pdf())
+        self.root.bind_all(f"<{mod}-w>", lambda _e=None: self._process_another())
+        self.root.bind_all(f"<{mod}-e>", lambda _e=None: self._export_draft())
+        self.root.bind_all(f"<{mod}-Shift-F>", lambda _e=None: self._finalize_clicked())
+
         try:
             self.root.tk.call("package", "require", "tkdnd")
             self.root.tk.call("tkdnd::drop_target", "register", self.root, "DND_Files")
@@ -164,6 +172,7 @@ class App:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(2, weight=1)
 
+        self._build_menubar()
         self._build_toolbar()
 
         ctk.CTkFrame(self.root, height=1, corner_radius=0,
@@ -205,6 +214,82 @@ class App:
                      fg_color=("gray80", "gray28")).grid(row=4, column=0, sticky="ew")
         self._build_statusbar()
 
+    def _build_menubar(self):
+        """Native menu bar (File + Worksheet) — the app's primary controls.
+
+        Every command reuses an existing handler that already runs its own
+        guards, so switching/closing mid-edit still prompts to save and the
+        worksheet actions stay no-ops when no project is open.
+        """
+        is_mac = sys.platform == "darwin"
+        accel = (lambda key: f"Cmd+{key}") if is_mac else (lambda key: f"Ctrl+{key}")
+
+        self._menubar = tk.Menu(self.root)
+
+        # ---- File ----
+        file_menu = tk.Menu(self._menubar, tearoff=0,
+                            postcommand=self._refresh_file_menu)
+        self._file_menu = file_menu
+        self._recent_menu = tk.Menu(file_menu, tearoff=0)
+
+        file_menu.add_command(label="New Project", accelerator=accel("N"),
+                              command=self._process_another)
+        file_menu.add_command(label="Open…", accelerator=accel("O"),
+                              command=self._choose_pdf)
+        file_menu.add_cascade(label="Open Recent", menu=self._recent_menu)
+        file_menu.add_separator()
+        file_menu.add_command(label="Close Project", accelerator=accel("W"),
+                              command=self._process_another)
+        file_menu.add_command(label="Save", accelerator=accel("S"),
+                              command=self._save_shortcut)
+        file_menu.add_command(label="Revert to Saved…",
+                              command=self._revert_clicked)
+        file_menu.add_separator()
+        file_menu.add_command(label="Quit", accelerator=accel("Q"),
+                              command=self._on_close)
+        self._menubar.add_cascade(label="File", menu=file_menu)
+
+        # ---- Worksheet ----
+        ws_menu = tk.Menu(self._menubar, tearoff=0,
+                          postcommand=self._refresh_worksheet_menu)
+        self._worksheet_menu = ws_menu
+        ws_menu.add_command(label="Export Draft", accelerator=accel("E"),
+                            command=self._export_draft)
+        ws_menu.add_command(label="Finalize…", accelerator=accel("Shift+F"),
+                            command=self._finalize_clicked)
+        self._menubar.add_cascade(label="Worksheet", menu=ws_menu)
+
+        self.root.configure(menu=self._menubar)
+
+    def _refresh_file_menu(self):
+        """Rebuild dynamic File-menu state each time it opens."""
+        editing = self.state == "editing" and self.editor is not None
+        state = "normal" if editing else "disabled"
+        self._file_menu.entryconfigure("Save", state=state)
+        self._file_menu.entryconfigure("Close Project", state=state)
+        can_revert = editing and self.session is not None and self.session.path
+        self._file_menu.entryconfigure(
+            "Revert to Saved…", state="normal" if can_revert else "disabled")
+
+        self._recent_menu.delete(0, "end")
+        recents = list_recent_sessions(limit=10)
+        if not recents:
+            self._recent_menu.add_command(label="(No recent projects)",
+                                          state="disabled")
+            return
+        for summary in recents:
+            self._recent_menu.add_command(
+                label=summary.school_name or "(untitled)",
+                command=lambda p=summary.path: self._open_session_path(p),
+            )
+
+    def _refresh_worksheet_menu(self):
+        """Enable the worksheet actions only while a project is open."""
+        editing = self.state == "editing" and self.editor is not None
+        state = "normal" if editing else "disabled"
+        self._worksheet_menu.entryconfigure("Export Draft", state=state)
+        self._worksheet_menu.entryconfigure("Finalize…", state=state)
+
     def _build_toolbar(self):
         bar = ctk.CTkFrame(self.root, fg_color=("gray95", "gray15"),
                            corner_radius=0, height=46)
@@ -244,25 +329,17 @@ class App:
         )
         self._dirty_lbl.pack(side="left")
 
-        def tool_btn(text, command, *, filled=False, col=0):
-            kwargs = dict(height=30, command=command,
-                          font=ctk.CTkFont(size=12, weight="bold" if filled else "normal"))
-            if filled:
-                kwargs.update(fg_color=ACCENT, hover_color=ACCENT_HOVER, width=96)
-            else:
-                kwargs.update(fg_color="transparent", border_width=1,
-                              border_color="gray60", text_color=("gray25", "gray85"),
-                              hover_color=("gray90", "gray25"), width=72)
-            btn = ctk.CTkButton(bar, text=text, **kwargs)
-            btn.grid(row=0, column=col, padx=(0, 8), pady=8)
-            return btn
-
-        self._open_btn = tool_btn("Open…", self._choose_pdf, col=3)
-        self._save_btn = tool_btn("Save", self._save_shortcut, col=4)
-        self._revert_btn = tool_btn("Revert…", self._revert_clicked, col=5)
-        self._draft_btn = tool_btn("Export Draft", self._export_draft, col=6)
-        self._finalize_btn = tool_btn("Finalize…", self._finalize_clicked,
-                                      filled=True, col=7)
+        # File/worksheet actions now live in the native menu bar. The only
+        # toolbar control is a quick "close project" affordance at the far
+        # right; the weight-1 title column (col 2) pushes it there.
+        self._close_btn = ctk.CTkButton(
+            bar, text="✕  Close project", height=30, width=120,
+            fg_color="transparent", border_width=1, border_color="gray60",
+            text_color=("gray25", "gray85"), hover_color=("gray90", "gray25"),
+            font=ctk.CTkFont(size=12),
+            command=self._process_another,
+        )
+        self._close_btn.grid(row=0, column=3, padx=(0, 12), pady=8)
         self._set_toolbar_enabled(False)
 
     def _build_statusbar(self):
@@ -321,12 +398,13 @@ class App:
     # ------------------------------------------------------------------ #
 
     def _set_toolbar_enabled(self, editing: bool):
-        state = "normal" if editing else "disabled"
-        for btn in (self._save_btn, self._draft_btn, self._finalize_btn):
-            btn.configure(state=state)
-        # Revert needs a saved file to go back to.
-        can_revert = editing and self.session is not None and self.session.path
-        self._revert_btn.configure(state="normal" if can_revert else "disabled")
+        # Actions live in the menu bar (enabled live via the menus' postcommands);
+        # the toolbar's only control is the close button, shown while a project
+        # is open and hidden on the home screen.
+        if editing:
+            self._close_btn.grid()
+        else:
+            self._close_btn.grid_remove()
 
     def _set_project_title(self, text: str | None, dirty: bool = False):
         if text:
