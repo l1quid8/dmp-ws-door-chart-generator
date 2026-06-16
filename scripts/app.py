@@ -11,6 +11,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
+from tkinterdnd2 import TkinterDnD, DND_FILES
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -48,6 +49,18 @@ SPINNER_FRAMES = list("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
+
+
+class CTkDnD(ctk.CTk, TkinterDnD.DnDWrapper):
+    """customtkinter root with tkinterdnd2's bundled tkdnd loaded.
+
+    tkinterdnd2 ships the tkdnd binaries cross-platform, so drag-and-drop works
+    in the packaged build without relying on a system-installed Tcl extension.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.TkdndVersion = TkinterDnD._require(self)
 
 
 def open_file(path: Path) -> None:
@@ -100,7 +113,7 @@ class TextRedirector:
 
 class App:
     def __init__(self):
-        self.root = ctk.CTk()
+        self.root = CTkDnD()
         _version = _app_version()
         self.root.title("DMP WS & Door Chart Generator" + (f"  v{_version}" if _version else ""))
         self.root.geometry("1000x680")
@@ -152,11 +165,10 @@ class App:
         self.root.bind_all(f"<{mod}-Shift-F>", lambda _e=None: self._finalize_clicked())
 
         try:
-            self.root.tk.call("package", "require", "tkdnd")
-            self.root.tk.call("tkdnd::drop_target", "register", self.root, "DND_Files")
-            self.root.bind("<<Drop>>", self._on_drop)
-        except Exception:
-            pass
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind("<<Drop>>", self._on_drop)
+        except Exception as e:
+            print(f"Drag-and-drop unavailable: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------ #
     # Layout shell                                                          #

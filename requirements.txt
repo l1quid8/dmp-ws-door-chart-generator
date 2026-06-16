@@ -1,6 +1,7 @@
 # Pinned for reproducible cross-platform builds. Build with Python 3.13.
 # Update by rebuilding a venv, then `pip freeze` the new versions back here.
 customtkinter==5.2.2
+tkinterdnd2==0.5.0
 pillow==12.2.0
 openpyxl==3.1.5
 PyMuPDF==1.27.2.3

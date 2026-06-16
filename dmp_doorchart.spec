@@ -91,6 +91,10 @@ ocrmypdf_modules = collect_submodules("ocrmypdf")
 ocrmypdf_data = collect_data_files("ocrmypdf", include_py_files=True)
 pdfminer_modules = collect_submodules("pdfminer")  # ocrmypdf dependency
 
+# tkinterdnd2 ships platform-specific tkdnd shared libraries (data files) that
+# PyInstaller must collect for drag-and-drop to work in the packaged build.
+tkdnd_data = collect_data_files("tkinterdnd2")
+
 a = Analysis(
     ["scripts/app.py"],
     pathex=[str(Path(".").resolve())],
@@ -101,9 +105,10 @@ a = Analysis(
         ("VERSION", "."),
         ("logos", "logos"),
         (CTK_DIR, "customtkinter"),
-    ] + ocr_datas + ocrmypdf_data,
+    ] + ocr_datas + ocrmypdf_data + tkdnd_data,
     hiddenimports=[
         "customtkinter",
+        "tkinterdnd2",
         "PIL",
         "PIL._imagingtk",
         "PIL.ImageTk",
