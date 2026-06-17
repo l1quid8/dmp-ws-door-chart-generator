@@ -192,13 +192,34 @@ def _phase3_topology_complete(design: DMPDesign) -> bool:
     return True
 
 
+_SHEET_RE = re.compile(r"INT[-\s]?(\d+\.\d+)", re.IGNORECASE)
+RISER_SHEET = "5.0"  # INT-5.0 is the riser diagram in the C1 standard sheet set
+
+
+def _page_sheet_number(text: str) -> str | None:
+    """The page's own sheet number, i.e. the sole INT-x.x ref in its title block.
+
+    Returns None for the cover/index page (which lists every sheet, so many refs)
+    or unlabeled pages, so those never match a specific sheet.
+    """
+    nums = {m.group(1) for m in _SHEET_RE.finditer(text)}
+    return next(iter(nums)) if len(nums) == 1 else None
+
+
 def _detect_riser_page(pdf_path: Path) -> int:
     """Find the page index of the riser-diagram sheet (INT-5.0).
 
-    SPLITTER anchors (`710-LX500-N`, `710-KP-N`) only appear on the riser — they don't
-    show on floor plans, which use motion-detector and RSP/MSP markers instead. So the
-    riser is the page with the most SPLITTER anchors. Fall back to highest total device
-    count if no page has splitters (very rare).
+    Primary: pick the page whose own title block is INT-5.0 — deterministic and
+    independent of page content. (A naive search for "INT-5.0" is not enough: the
+    cover/index sheet also lists it, so we match only the page where it's the SOLE
+    sheet number.)
+
+    Fallback: SPLITTER anchors (`710-LX500-N`, `710-KP-N`) cluster on the riser, so
+    the page with the most splitter anchors (tiebroken by total device count) is the
+    best guess. Used only when no page is labeled INT-5.0 (renumbered set, image-only
+    title block, OCR gap). This is the historical heuristic, and it is fragile — e.g.
+    a dense siteplan can tie the riser on splitter anchors — which is exactly why the
+    sheet-number path is preferred.
     """
     from extract_topology import extract_spans, classify_label
     import fitz
@@ -213,6 +234,10 @@ def _detect_riser_page(pdf_path: Path) -> int:
                 spans = extract_spans(pdf_path, page_idx=i)
             except Exception:
                 continue
+            # Primary path: this page's title block is the riser sheet.
+            page_text = " ".join(sp.text for sp in spans)
+            if _page_sheet_number(page_text) == RISER_SHEET:
+                return i
             splitter_count = 0
             total_count = 0
             for sp in spans:
@@ -228,6 +253,11 @@ def _detect_riser_page(pdf_path: Path) -> int:
                 best_page = i
     finally:
         doc.close()
+    print(
+        f"_detect_riser_page: no page labeled INT-{RISER_SHEET}; "
+        f"falling back to splitter-anchor heuristic (page {best_page}).",
+        file=sys.stderr,
+    )
     return best_page
 
 
