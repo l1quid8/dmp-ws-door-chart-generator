@@ -74,6 +74,10 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # Auto-build release notes from commits/PRs so a release is never
+          # published blank. Hand-edit afterward for a polished, grouped
+          # changelog on larger releases.
+          generate_release_notes: true
           files: |
             artifacts/macos/*
             artifacts/windows/*
