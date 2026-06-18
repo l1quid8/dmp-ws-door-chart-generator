@@ -44,6 +44,7 @@ from session import (  # noqa: E402
     list_recent_sessions,
     load_recovery,
     load_session,
+    normalize_zone_descriptions,
     pending_recovery,
     save_session,
     sync_master_zones,
@@ -281,6 +282,69 @@ def test_ensure_editable_zones_synthesis():
     assert by_num[502].location == "SPARE" and by_num[502].device_type == "Spare"
     assert by_num[515].device_type == "Supervisory"
     assert by_num[516].device_type == "Supervisory"
+
+
+def test_normalize_zone_descriptions_blank_to_spare():
+    design = DMPDesign(
+        zones=[
+            ZoneInfo(number=501, location="CLASSROOM 1", device_type="Motion"),
+            ZoneInfo(number=502, location="", device_type="Motion"),
+            ZoneInfo(number=503, location="   ", device_type="Motion"),
+            ZoneInfo(number=504, location=None, device_type="Motion"),
+            ZoneInfo(number=505, location="new", device_type="Motion"),
+        ],
+    )
+    normalize_zone_descriptions(design)
+    by_num = {z.number: z for z in design.zones}
+    assert by_num[501].location == "CLASSROOM 1"  # real room untouched
+    for num in (502, 503, 504, 505):
+        assert by_num[num].location == "SPARE"
+        assert by_num[num].device_type == "Spare"
+
+
+def test_normalize_zone_descriptions_supervisory_16zone_overrides_location():
+    design = DMPDesign(
+        rsps=[RSP(number=2, zones=list(range(501, 517)))],
+        zones=[
+            # last two carry equipment-location text that must be overridden
+            ZoneInfo(number=515, location="ELECTRICAL ROOM", device_type="Motion"),
+            ZoneInfo(number=516, location="ELECTRICAL ROOM", device_type="Motion"),
+        ],
+    )
+    normalize_zone_descriptions(design)
+    by_num = {z.number: z for z in design.zones}
+    assert by_num[515].location == "PS-2: A/C LOSS"
+    assert by_num[515].device_type == "Supervisory"
+    assert by_num[516].location == "PS-2: BATT. TRBL"
+    assert by_num[516].device_type == "Supervisory"
+
+
+def test_normalize_zone_descriptions_supervisory_8zone():
+    design = DMPDesign(
+        rsps=[RSP(number=1, zones=list(range(501, 509)), model="714-8")],
+        zones=[ZoneInfo(number=n, location="", device_type="Motion")
+               for n in range(501, 509)],
+    )
+    normalize_zone_descriptions(design)
+    by_num = {z.number: z for z in design.zones}
+    assert by_num[507].location == "PS-1: A/C LOSS"
+    assert by_num[508].location == "PS-1: BATT. TRBL"
+    # the other six become SPARE, not supervisory
+    assert by_num[501].location == "SPARE" and by_num[501].device_type == "Spare"
+    assert by_num[506].location == "SPARE"
+
+
+def test_normalize_zone_descriptions_supervisory_not_clobbered_by_spare():
+    """Supervisory zones get labels in step 1 and survive the step-2 SPARE fill."""
+    design = DMPDesign(
+        rsps=[RSP(number=1, zones=list(range(501, 517)))],
+        zones=[ZoneInfo(number=515, location="", device_type="Motion"),
+               ZoneInfo(number=516, location="", device_type="Motion")],
+    )
+    normalize_zone_descriptions(design)
+    by_num = {z.number: z for z in design.zones}
+    assert by_num[515].location == "PS-1: A/C LOSS"
+    assert by_num[516].location == "PS-1: BATT. TRBL"
 
 
 def test_ensure_editable_zones_noop_when_zones_exist():

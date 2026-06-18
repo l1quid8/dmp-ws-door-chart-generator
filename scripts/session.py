@@ -215,6 +215,48 @@ def ensure_editable_zones(design: DMPDesign) -> None:
                                      device_type=dtype, partition=1))
 
 
+def normalize_zone_descriptions(design: DMPDesign) -> None:
+    """Clean up editable zone rows at load/import time.
+
+    Two static conventions the Zones tab should always reflect:
+
+    1. The last two physical zones of every RSP are the paired power supply's
+       supervisory points (second-to-last = A/C LOSS, last = BATT. TRBL). This
+       is positional, not content-based, so it overrides any equipment-location
+       text that an older Point Info sheet left on those zones. Mirrors the
+       positional logic in generate_dmp_ws.py.
+    2. A zone with no real description (blank, whitespace-only, or the leftover
+       'NEW' placeholder) is an unused point, so it becomes SPARE.
+
+    Step 1 runs first so the supervisory zones carry non-blank labels and are
+    left untouched by step 2.
+    """
+    from validation import _PLACEHOLDER_RE
+
+    by_number = {z.number: z for z in design.zones}
+
+    # Step 1 — positional supervisory labels for the last two zones of each RSP.
+    for rsp in design.rsps:
+        ordered = sorted(rsp.zones)
+        if len(ordered) < 2:
+            continue
+        ac_zi = by_number.get(ordered[-2])
+        if ac_zi is not None:
+            ac_zi.location = f"PS-{rsp.number}: A/C LOSS"
+            ac_zi.device_type = "Supervisory"
+        batt_zi = by_number.get(ordered[-1])
+        if batt_zi is not None:
+            batt_zi.location = f"PS-{rsp.number}: BATT. TRBL"
+            batt_zi.device_type = "Supervisory"
+
+    # Step 2 — blank / placeholder descriptions become SPARE.
+    for zi in design.zones:
+        loc = (zi.location or "").strip()
+        if not loc or _PLACEHOLDER_RE.match(loc):
+            zi.location = "SPARE"
+            zi.device_type = "Spare"
+
+
 def normalize_rsp_tokens(design: DMPDesign) -> None:
     """Canonicalize splitter output tokens to the written 'RSP-N' convention.
 

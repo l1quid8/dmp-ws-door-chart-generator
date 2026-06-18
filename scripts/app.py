@@ -36,6 +36,7 @@ from session import (
     load_recovery,
     load_session,
     normalize_rsp_tokens,
+    normalize_zone_descriptions,
     pending_recovery,
     sync_master_zones,
 )
@@ -1138,6 +1139,7 @@ class App:
         # splitter tokens so validation only flags hand-typed regressions.
         ensure_editable_zones(session.design)
         normalize_rsp_tokens(session.design)
+        normalize_zone_descriptions(session.design)
         self.session = session
         self.parsed_design = session.design  # generation flows read this
         self.state = "editing"
