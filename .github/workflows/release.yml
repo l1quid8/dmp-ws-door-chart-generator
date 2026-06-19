@@ -8,21 +8,38 @@ on:
       - 'v*'
 
 jobs:
+  # The in-app updater compares the bundled VERSION against the latest release
+  # tag, so they must match. Fail fast if a tag is pushed that disagrees with
+  # the VERSION file (this has drifted before — e.g. a mistaken v1.4.0).
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify VERSION matches tag
+        run: |
+          test "v$(cat VERSION)" = "${GITHUB_REF_NAME}" \
+            || { echo "VERSION ($(cat VERSION)) != tag ${GITHUB_REF_NAME}"; exit 1; }
+
   build-macos:
+    needs: verify-version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - name: Install OCR tools
-        run: brew install tesseract ghostscript
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      # macos-latest runners are Apple Silicon (arm64), and tkinterdnd2 0.5.0
+      # ships ONLY a Tcl 9 tkdnd for osx-arm64 (libtcl9tkdnd2.9.5.dylib). The
+      # actions/setup-python interpreter bundles Tk 8.6, which produces a bundle
+      # that crashes at launch with "interpreter uses an incompatible stubs
+      # mechanism". Build with Homebrew's Tk 9 Python instead — this matches
+      # build_mac.command, whose local builds run correctly.
+      - name: Install Python 3.13 (Tk 9) + OCR tools
+        run: brew install python@3.13 python-tk@3.13 tesseract ghostscript
       - name: Build .app
-        run: pyinstaller --noconfirm dmp_doorchart.spec
+        run: |
+          PY="$(brew --prefix python@3.13)/bin/python3.13"
+          "$PY" -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+          .venv/bin/pyinstaller --noconfirm dmp_doorchart.spec
       - name: Zip .app
         run: |
           cd dist
@@ -37,6 +54,7 @@ jobs:
           retention-days: 1
 
   build-windows:
+    needs: verify-version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

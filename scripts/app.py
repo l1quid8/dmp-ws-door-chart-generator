@@ -4,6 +4,8 @@ import json
 import threading
 import subprocess
 import contextlib
+import tempfile
+import webbrowser
 from datetime import date
 from pathlib import Path
 
@@ -41,6 +43,7 @@ from session import (
     sync_master_zones,
 )
 from editor_frame import EditorFrame
+import updater
 
 DOOR_CHART_TEMPLATE = resource_path("door_chart_template_blank.xlsx")
 PREFS_PATH = Path.home() / ".c1_door_chart_app.json"
@@ -171,6 +174,11 @@ class App:
         except Exception as e:
             print(f"Drag-and-drop unavailable: {e}", file=sys.stderr)
 
+        # Background update check shortly after the window is up (silent: only
+        # surfaces a dialog when a newer release exists and wasn't skipped).
+        self._update_dialog: ctk.CTkToplevel | None = None
+        self.root.after(1200, lambda: self._check_for_updates(silent=True))
+
     # ------------------------------------------------------------------ #
     # Layout shell                                                          #
     # ------------------------------------------------------------------ #
@@ -239,6 +247,17 @@ class App:
 
         self._menubar = tk.Menu(self.root)
 
+        # ---- Application menu (macOS) ----
+        # On macOS "Check for Updates…" belongs in the bold app-name menu — the
+        # native home users expect (matching Sparkle apps). Commands added to a
+        # menu named "apple" appear at the top of that application menu.
+        if is_mac:
+            app_menu = tk.Menu(self._menubar, name="apple")
+            self._menubar.add_cascade(menu=app_menu)
+            app_menu.add_command(
+                label="Check for Updates…",
+                command=lambda: self._check_for_updates(silent=False))
+
         # ---- File ----
         file_menu = tk.Menu(self._menubar, tearoff=0,
                             postcommand=self._refresh_file_menu)
@@ -271,6 +290,14 @@ class App:
         ws_menu.add_command(label="Finalize…", accelerator=accel("Shift+F"),
                             command=self._finalize_clicked)
         self._menubar.add_cascade(label="Worksheet", menu=ws_menu)
+
+        # ---- Help (non-macOS: no application menu, so updates live here) ----
+        if not is_mac:
+            help_menu = tk.Menu(self._menubar, tearoff=0)
+            help_menu.add_command(
+                label="Check for Updates…",
+                command=lambda: self._check_for_updates(silent=False))
+            self._menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.configure(menu=self._menubar)
 
@@ -1476,6 +1503,145 @@ class App:
     # ------------------------------------------------------------------ #
     # Close guard                                                           #
     # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    # Auto-update                                                          #
+    # ------------------------------------------------------------------ #
+
+    def _check_for_updates(self, silent: bool = True):
+        """Query GitHub for the latest release on a background thread.
+
+        silent=True (launch check) throttles to once/day and stays quiet unless a
+        newer, non-skipped release exists. silent=False (Help menu) always reports.
+        """
+        if silent and load_prefs().get("last_update_check") == date.today().isoformat():
+            return
+
+        def work():
+            info = updater.fetch_latest()
+            self.root.after(0, lambda: self._on_update_info(info, silent))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_info(self, info, silent: bool):
+        if info is None:
+            if not silent:
+                messagebox.showinfo(
+                    "Check for Updates",
+                    "Couldn't reach the update server. Please try again later.")
+            return
+
+        prefs = load_prefs()
+        prefs["last_update_check"] = date.today().isoformat()
+        save_prefs(prefs)
+
+        if not updater.is_newer(info["version"], updater.current_version()):
+            if not silent:
+                messagebox.showinfo(
+                    "Check for Updates",
+                    f"You're up to date (v{updater.current_version_str()}).")
+            return
+
+        if silent and prefs.get("skip_version") == info["tag"]:
+            return
+
+        self._show_update_dialog(info)
+
+    def _show_update_dialog(self, info):
+        if self._update_dialog is not None and self._update_dialog.winfo_exists():
+            self._update_dialog.lift()
+            return
+
+        dlg = ctk.CTkToplevel(self.root)
+        self._update_dialog = dlg
+        dlg.title("Update Available")
+        dlg.geometry("460x420")
+        dlg.transient(self.root)
+        dlg.protocol("WM_DELETE_WINDOW", lambda: self._close_update_dialog())
+
+        cur = updater.current_version_str()
+        ctk.CTkLabel(
+            dlg, text=f"Version {info['tag'].lstrip('v')} is available",
+            font=ctk.CTkFont(size=16, weight="bold")).pack(padx=20, pady=(20, 2))
+        ctk.CTkLabel(dlg, text=f"You have v{cur}.",
+                     text_color=("gray40", "gray70")).pack(padx=20, pady=(0, 10))
+
+        notes = ctk.CTkTextbox(dlg, height=200, wrap="word")
+        notes.pack(fill="both", expand=True, padx=20)
+        notes.insert("1.0", info["notes"] or "See the release page for details.")
+        notes.configure(state="disabled")
+
+        btns = ctk.CTkFrame(dlg, fg_color="transparent")
+        btns.pack(fill="x", padx=20, pady=16)
+
+        def later():
+            prefs = load_prefs()
+            prefs["skip_version"] = info["tag"]
+            save_prefs(prefs)
+            self._close_update_dialog()
+
+        ctk.CTkButton(btns, text="Later", width=90, fg_color="transparent",
+                      border_width=1, text_color=("gray30", "gray80"),
+                      command=later).pack(side="left")
+
+        if updater.can_self_update() and info["asset_url"]:
+            ctk.CTkButton(btns, text="Update Now", width=130,
+                          fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                          command=lambda: self._start_update(info, dlg, btns)
+                          ).pack(side="right")
+        else:
+            # Dev run or missing asset — fall back to the download page.
+            ctk.CTkButton(
+                btns, text="Open Download Page", width=170,
+                fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                command=lambda: (webbrowser.open(info["html_url"]),
+                                 self._close_update_dialog())
+            ).pack(side="right")
+
+    def _close_update_dialog(self):
+        if self._update_dialog is not None and self._update_dialog.winfo_exists():
+            self._update_dialog.destroy()
+        self._update_dialog = None
+
+    def _start_update(self, info, dlg, btns):
+        """Download the new build with a progress bar, then swap + relaunch."""
+        for child in btns.winfo_children():
+            child.destroy()
+        status = ctk.CTkLabel(btns, text="Downloading…")
+        status.pack(side="left")
+        bar = ctk.CTkProgressBar(btns, width=200)
+        bar.set(0)
+        bar.pack(side="right")
+
+        def progress(frac):
+            self.root.after(0, lambda: bar.set(frac) if bar.winfo_exists() else None)
+
+        def work():
+            try:
+                zip_path = Path(tempfile.mkdtemp(prefix="dmp_dl_")) / "update.zip"
+                updater.download(info["asset_url"], zip_path, progress)
+                ok = updater.apply_update(zip_path)
+            except Exception as exc:
+                self.root.after(0, lambda: self._update_failed(str(exc)))
+                return
+            if ok:
+                self.root.after(0, self._quit_for_update)
+            else:
+                self.root.after(0, lambda: self._update_failed(
+                    "Self-update isn't available for this build."))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_failed(self, msg: str):
+        self._close_update_dialog()
+        messagebox.showerror("Update failed", f"{msg}\n\nYou can download the latest "
+                             "build from the GitHub releases page.")
+
+    def _quit_for_update(self):
+        """Quit so the detached helper can replace files and relaunch."""
+        if self.state == "editing" and self.editor and not self.editor.maybe_close():
+            return  # user cancelled the save prompt — leave the app open
+        self.root.destroy()
 
     def _on_close(self):
         if self.state in ("generating_dmp", "generating_chart"):

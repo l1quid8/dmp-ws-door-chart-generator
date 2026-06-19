@@ -89,7 +89,22 @@ git push origin v1.0.1
 ```
 
 GitHub Actions builds the macOS `.app` and Windows `.exe` and attaches both to a
-GitHub Release for that tag. The Release is the version archive.
+GitHub Release for that tag. The Release is the version archive. CI fails fast if
+the pushed tag doesn't match the `VERSION` file, so the two can't drift.
+
+## Auto-update
+
+Once a colleague has any packaged build installed, it **updates itself** — no more
+re-sending zips. On launch (throttled to once/day) the app checks the public
+GitHub Releases API; if a newer release exists it shows an *"Update available"*
+dialog with the release notes and an **Update Now** button that downloads the new
+build, swaps the running app in place, and relaunches. There's also a manual
+**Help → Check for Updates…** menu item.
+
+Because the app downloads the update itself, the new build opens **without** the
+Gatekeeper / SmartScreen warning seen on the first manual install. Releasing is
+unchanged: bump `VERSION`, tag `vX.Y.Z`, push — every existing install picks it up.
+(The updater is stdlib-only; see `scripts/updater.py`.)
 
 ## Sharing with a colleague (Windows, no install)
 
