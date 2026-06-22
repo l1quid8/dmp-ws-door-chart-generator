@@ -56,17 +56,13 @@ class ParsedDesign:
 
 # -------- helpers --------
 
-ZONE_NUMBER_RE = re.compile(
-    r"""^
-    (?:Z|7|2|1)?       # optional leading char (often misread for 'Z')
-    (?:7|2|1)?         # sometimes a second leading digit-confused-for-Z
-    (\d{3})            # the 3 actual zone digits
-    /RSP(\d+)          # /RSP{n}
-    \s*
-    (.*)$              # the rest of the line (often empty when OCR puts each cell on its own line)
-    """,
-    re.VERBOSE,
-)
+# 3 zone digits immediately followed by "/RSP{n}". Found with .search (not anchored):
+# OCR sometimes prepends a floating callout annotation onto the cell line, e.g.
+# "(MAIN OFFICE, BUILDING | 7557/RSP5", which an anchored match would skip — silently
+# dropping that zone. Anchoring the capture on the 3 digits before "/RSP" also absorbs the
+# common leading-'Z'-misread (Z->7/2/1) without special-casing it: only the trailing 3
+# digits matter ("7557/RSP5" -> "557"). normalize_zone_number's range guard rejects stray hits.
+ZONE_NUMBER_RE = re.compile(r"(\d{3})/RSP(\d+)")
 
 # Identifier-only forms (when each table cell lands on its own line)
 COMBUS_RSP_ID_RE = re.compile(r"^RSP\s*(\d+)\s*$", re.IGNORECASE)
@@ -281,7 +277,7 @@ def extract_zones(text: str) -> list[ZoneRecord]:
     for idx, s in enumerate(lines):
         if not s:
             continue
-        m = ZONE_NUMBER_RE.match(s)
+        m = ZONE_NUMBER_RE.search(s)
         if not m:
             continue
         zone_num = normalize_zone_number(m.group(1))
