@@ -38,6 +38,7 @@ from hardware import (  # noqa: E402
     remove_expander,
     remove_keypad,
     remove_splitter,
+    renumber_splitter,
     zone_block_for,
 )
 
@@ -170,6 +171,50 @@ def test_remove_splitter_scrubs_refs_and_keypad_sources():
     remove_splitter(d, "710-LX500-2")
     assert s1.outputs == ["Spare", "RSP-1", "Spare"]
     assert d.keypads[0].source is None
+
+
+def test_renumber_splitter_into_free_slot():
+    d = DMPDesign()
+    add_splitter(d, "LX")
+    renumber_splitter(d, "710-LX500-1", 4)
+    assert [s.id for s in d.splitters] == ["710-LX500-4"]
+
+
+def test_renumber_splitter_rewrites_all_refs():
+    d = DMPDesign()
+    s1 = add_splitter(d, "LX")          # 710-LX500-1
+    s2 = add_splitter(d, "LX")          # 710-LX500-2
+    s1.outputs = ["To 710-LX500-2", "RSP-1", "Spare"]
+    s2.inputs = {"LX-Bus In": "From 710-LX500-1"}
+    d.keypads.append(Keypad(number=2, source="710-LX500-2", location="HALL"))
+    renumber_splitter(d, "710-LX500-2", 5)
+    assert s1.outputs == ["To 710-LX500-5", "RSP-1", "Spare"]
+    assert s2.id == "710-LX500-5"
+    assert d.keypads[0].source == "710-LX500-5"
+
+
+def test_renumber_splitter_rejects_duplicate():
+    d = DMPDesign()
+    add_splitter(d, "LX"); add_splitter(d, "LX")
+    with pytest.raises(HardwareError):
+        renumber_splitter(d, "710-LX500-1", 2)
+
+
+def test_renumber_splitter_rejects_out_of_range():
+    d = DMPDesign()
+    add_splitter(d, "LX")
+    with pytest.raises(HardwareError):
+        renumber_splitter(d, "710-LX500-1", 0)
+    with pytest.raises(HardwareError):
+        renumber_splitter(d, "710-LX500-1", MAX_SPLITTERS_PER_TYPE + 1)
+
+
+def test_renumber_splitter_types_are_independent():
+    d = DMPDesign()
+    add_splitter(d, "LX")               # 710-LX500-1
+    kp = add_splitter(d, "KP")          # 710-KP-1
+    renumber_splitter(d, "710-LX500-1", 2)   # KP-1 must not block LX->2
+    assert {s.id for s in d.splitters} == {"710-LX500-2", "710-KP-1"}
 
 
 # -------- keypads --------

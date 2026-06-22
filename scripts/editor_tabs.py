@@ -27,6 +27,7 @@ from hardware import (
     remove_expander,
     remove_keypad,
     remove_splitter,
+    renumber_splitter,
 )
 from session import Session
 
@@ -325,6 +326,28 @@ class SplittersTab(ctk.CTkFrame):
         remove_splitter(self.session.design, splitter.id)
         self.on_structure_change()
 
+    def _renumber_clicked(self, splitter, entry):
+        if not entry.winfo_exists():
+            return  # widget already torn down by a prior rebuild
+        text = entry.get().strip()
+        cur_num = splitter.id.rsplit("-", 1)[-1]
+        if not text.isdigit():
+            entry.delete(0, "end")
+            entry.insert(0, cur_num)
+            return
+        new_number = int(text)
+        if str(new_number) == cur_num:
+            return  # unchanged
+        try:
+            renumber_splitter(self.session.design, splitter.id, new_number)
+        except HardwareError as exc:
+            messagebox.showwarning("Can't renumber splitter", str(exc),
+                                   parent=self.winfo_toplevel())
+            entry.delete(0, "end")
+            entry.insert(0, cur_num)
+            return
+        self.on_structure_change()
+
     # ---- splitter cards ----
 
     def _output_choices(self, splitter) -> list[str]:
@@ -334,13 +357,33 @@ class SplittersTab(ctk.CTkFrame):
         others = [f"To {o.id}" for o in design.splitters if o.id != splitter.id]
         return ["Spare"] + rsp_names + kp_names + others
 
+    def _input_choices(self, splitter) -> list[str]:
+        design = self.session.design
+        if splitter.splitter_type == "LX":
+            bus = [f"{n} BUS IN FROM XR/550" for n in (500, 600, 700)]
+        else:
+            bus = ["KEYPAD BUS IN FROM XR/550"]
+        upstream = [f"From {o.id}" for o in design.splitters if o.id != splitter.id]
+        return bus + upstream
+
     def _build_splitter_card(self, splitter) -> ctk.CTkFrame:
         card = ctk.CTkFrame(self.body, corner_radius=8, fg_color=("gray97", "gray20"))
         card.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(card, text=splitter.id,
-                     font=ctk.CTkFont(size=12, weight="bold"),
-                     ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        id_row = ctk.CTkFrame(card, fg_color="transparent")
+        id_row.grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        prefix = "710-LX500-" if splitter.splitter_type == "LX" else "710-KP-"
+        ctk.CTkLabel(id_row, text=prefix,
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(side="left")
+        num_entry = ctk.CTkEntry(id_row, width=44, height=28, justify="center",
+                                 font=ctk.CTkFont(size=12, weight="bold"))
+        cur_num = splitter.id.rsplit("-", 1)[-1]
+        num_entry.insert(0, cur_num)
+        num_entry.pack(side="left")
+        num_entry.bind("<Return>",
+                       lambda _e, s=splitter, w=num_entry: self._renumber_clicked(s, w))
+        num_entry.bind("<FocusOut>",
+                       lambda _e, s=splitter, w=num_entry: self._renumber_clicked(s, w))
 
         loc_var = tk.StringVar(value=splitter.location or "")
 
@@ -357,10 +400,16 @@ class SplittersTab(ctk.CTkFrame):
             row=0, column=2, padx=(0, 8), pady=(10, 0))
 
         first_input = next((v for v in splitter.inputs.values() if v), "")
-        ctk.CTkLabel(card, text=f"input: {first_input or '—'}",
+        ctk.CTkLabel(card, text="input:", anchor="w",
                      font=ctk.CTkFont(size=11), text_color="gray50",
-                     ).grid(row=1, column=0, columnspan=2, sticky="w",
-                            padx=12, pady=(0, 2))
+                     ).grid(row=1, column=0, sticky="w", padx=(12, 0), pady=(0, 2))
+        in_var = tk.StringVar(value=first_input)
+        in_var.trace_add("write", lambda *_a, s=splitter, v=in_var:
+                         self._set_input(s, v.get()))
+        ctk.CTkComboBox(card, variable=in_var, height=28,
+                        values=self._input_choices(splitter),
+                        button_color=ACCENT, button_hover_color=ACCENT_HOVER,
+                        ).grid(row=1, column=1, sticky="ew", padx=(8, 4), pady=(0, 2))
 
         choices = self._output_choices(splitter)
         outs = list(splitter.outputs or [])
@@ -382,6 +431,14 @@ class SplittersTab(ctk.CTkFrame):
             menu.pack(side="left", padx=(6, 0))
         ctk.CTkLabel(card, text="", height=4).grid(row=5, column=0, pady=(0, 2))
         return card
+
+    def _set_input(self, splitter, value: str):
+        val = value.strip()
+        # preserve the existing input key if present, else derive from bus type
+        key = next(iter(splitter.inputs), None) or (
+            "LX-Bus In" if splitter.splitter_type == "LX" else "KP-Bus In")
+        splitter.inputs = {key: val} if val else {}
+        self.on_change()
 
     def _set_output(self, splitter, index: int, value: str):
         outs = list(splitter.outputs or [])

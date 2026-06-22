@@ -141,6 +141,24 @@ def _splitter_id(splitter_type: str, n: int) -> str:
     return f"710-LX500-{n}" if splitter_type == "LX" else f"710-KP-{n}"
 
 
+def _splitter_number(splitter: Splitter) -> int | None:
+    m = _SPLITTER_NUM_RE.search(splitter.id or "")
+    return int(m.group(1)) if m else None
+
+
+def _used_numbers(design: DMPDesign, splitter_type: str,
+                  exclude: Splitter | None = None) -> set[int]:
+    """Trailing numbers already taken by splitters of this type."""
+    used = set()
+    for s in design.splitters:
+        if s.splitter_type != splitter_type or s is exclude:
+            continue
+        n = _splitter_number(s)
+        if n is not None:
+            used.add(n)
+    return used
+
+
 def add_splitter(design: DMPDesign, splitter_type: str,
                  location: str | None = None) -> Splitter:
     if splitter_type not in ("LX", "KP"):
@@ -151,11 +169,7 @@ def add_splitter(design: DMPDesign, splitter_type: str,
             f"The splitter sheet fits at most {MAX_SPLITTERS_PER_TYPE} "
             f"{splitter_type} splitters."
         )
-    used = set()
-    for s in same_type:
-        m = _SPLITTER_NUM_RE.search(s.id or "")
-        if m:
-            used.add(int(m.group(1)))
+    used = _used_numbers(design, splitter_type)
     n = 1
     while n in used:
         n += 1
@@ -177,6 +191,37 @@ def remove_splitter(design: DMPDesign, splitter_id: str) -> None:
     for kp in design.keypads:
         if (kp.source or "").strip() == splitter_id:
             kp.source = None
+
+
+def renumber_splitter(design: DMPDesign, splitter_id: str,
+                      new_number: int) -> Splitter:
+    """Change a splitter's trailing number (the 'N' in 710-LX500-N / 710-KP-N).
+
+    The parser carries the diagram's numbering verbatim, so a missed splitter
+    leaves a gap the tech can only patch with an out-of-order add. This lets
+    them reassign the number directly. The number is a foreign key — keypad
+    sources and other splitters' 'To …'/'From …' tokens reference the id by
+    string — so every reference is rewritten atomically, mirroring how
+    remove_splitter scrubs them.
+    """
+    splitter = next((s for s in design.splitters if s.id == splitter_id), None)
+    if splitter is None:
+        raise HardwareError(f"No splitter {splitter_id} in this design.")
+    if _splitter_number(splitter) == new_number:
+        return splitter  # no-op
+    if not 1 <= new_number <= MAX_SPLITTERS_PER_TYPE:
+        raise HardwareError(
+            f"Splitter number must be between 1 and {MAX_SPLITTERS_PER_TYPE}."
+        )
+    new_id = _splitter_id(splitter.splitter_type, new_number)
+    if new_number in _used_numbers(design, splitter.splitter_type, exclude=splitter):
+        raise HardwareError(f"{new_id} already exists. Pick a free number.")
+
+    old_id = splitter.id
+    splitter.id = new_id
+    _retoken_splitter_refs(design, old_id, new_id)
+    design.splitters.sort(key=lambda s: (s.splitter_type, _splitter_number(s) or 0))
+    return splitter
 
 
 # -------- keypads --------
@@ -211,3 +256,19 @@ def _scrub_splitter_outputs(design: DMPDesign, token: str) -> None:
     for s in design.splitters:
         s.outputs = ["Spare" if (o or "").strip() == token else o
                      for o in (s.outputs or [])]
+
+
+def _retoken_splitter_refs(design: DMPDesign, old_id: str, new_id: str) -> None:
+    """Repoint every reference to a renumbered splitter from old_id to new_id.
+
+    Outputs/inputs hold whole-string tokens ('To 710-LX500-2', 'From …') and
+    keypad sources hold the bare id, so exact-match replacement is correct and
+    avoids partial-number collisions ('710-LX500-1' vs '710-LX500-10')."""
+    for s in design.splitters:
+        s.outputs = [f"To {new_id}" if (o or "").strip() == f"To {old_id}" else o
+                     for o in (s.outputs or [])]
+        s.inputs = {k: (f"From {new_id}" if (v or "").strip() == f"From {old_id}" else v)
+                    for k, v in (s.inputs or {}).items()}
+    for kp in design.keypads:
+        if (kp.source or "").strip() == old_id:
+            kp.source = new_id
