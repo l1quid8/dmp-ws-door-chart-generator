@@ -485,6 +485,35 @@ def apply_location_conflict(design: DMPDesign, conflict: LocationConflict, value
                 kp.location = value
 
 
+def _expander_model_for_count(zone_count: int) -> str:
+    """Infer the expander model from how many zones the PDF lists for the module.
+
+    The zone schedule lists every physical point per module (motion + spares + the
+    two paired-power-supply supervisory points), so the count is the port count:
+    a 714-8 carries 8, a 714-16 carries 16. Anything 8 or fewer is a 714-8.
+    """
+    return "714-8" if zone_count <= 8 else "714-16"
+
+
+def _ps_relays(zone_nums: list[int], model: str, rsp_num: int) -> dict[int, str]:
+    """Relay assignments for an expander's paired 505-12G power supply.
+
+    The module's last two physical zones supervise the PS (A/C-loss then battery),
+    so the trouble-zone labels must reference the actual top two zone numbers — not
+    a fixed +14/+15 offset, which only ever held for a full 16-zone module.
+    """
+    if not zone_nums:
+        return {}
+    sv = sorted(zone_nums)
+    ac, batt = (sv[-2], sv[-1]) if len(sv) >= 2 else ("??", "??")
+    return {
+        1: "12v DC Output to Terminal Strip",
+        2: f"AC Trouble Zone {ac} ({model} Expander #{rsp_num})",
+        3: f"Battery Trouble Zone {batt} ({model} Expander #{rsp_num})",
+        4: "Battery 12V",
+    }
+
+
 def build_dmp_design_from_pdf(
     searchable_pdf: Path,
     design_pdf: Path,
@@ -573,21 +602,18 @@ def build_dmp_design_from_pdf(
         zones = rsp_zones.get(rsp_num, [])
         # Include ALL zones assigned to this RSP (including spares and PS supervisory)
         zone_nums = [int(z.zone[1:]) for z in zones]
+        model = _expander_model_for_count(len(zone_nums))
 
         design.rsps.append(RSP(
             number=rsp_num,
             location=f"{combus_line.building} {combus_line.floor} {combus_line.room}",
             zones=zone_nums,
+            model=model,
         ))
         design.power_supplies.append(PowerSupply(
             number=rsp_num,
             location=f"{combus_line.building} {combus_line.floor} {combus_line.room}",
-            relays={
-                1: "12v DC Output to Terminal Strip",
-                2: f"AC Trouble Zone {min(zone_nums) + 14 if zone_nums else '??'} (714-16 Expander #{rsp_num})",
-                3: f"Battery Trouble Zone {min(zone_nums) + 15 if zone_nums else '??'} (714-16 Expander #{rsp_num})",
-                4: "Battery 12V",
-            } if zone_nums else {},
+            relays=_ps_relays(zone_nums, model, rsp_num),
         ))
 
     # Keypads: KP#1 = MSP service KP (from first RSP location), rest from combus_lines
@@ -805,6 +831,22 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path,
     shutil.copy(template_path, output_path)
 
     wb = openpyxl.load_workbook(output_path)
+
+    # Normalize each expander's model + paired-PS relay text from its LIVE zone count.
+    # Zone count == port count in this data model (add_expander materializes exactly
+    # EXPANDER_MODELS[model] zones; the PDF lists every port). A worksheet re-imported from an
+    # older/pre-fix file may carry a stale "714-16" in the Exp Mod text (and wrong supervisory
+    # zones in the relay labels) even for an 8-port module; deriving from the zone count keeps
+    # the Exp Mod sheet, LX-bus row, Point Info source labels, and PS relays consistent
+    # regardless of how the design was loaded (PDF, xlsx re-import, or editor).
+    for rsp in design.rsps:
+        if rsp.zones:
+            rsp.model = _expander_model_for_count(len(rsp.zones))
+    _rsp_by_num = {r.number: r for r in design.rsps}
+    for ps in design.power_supplies:
+        rsp = _rsp_by_num.get(ps.number)
+        if rsp and rsp.zones:
+            ps.relays = _ps_relays(rsp.zones, rsp.model, ps.number)
 
     # SITE INFO sheet
     ws = wb["SITE INFO"]
@@ -1079,6 +1121,41 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path,
             # Re-apply explicit center alignment so the cell renders centered in Excel
             # regardless of whether the column-level style is honored.
             cell.alignment = center
+
+        # Point Info detail sheets: the template wires each "Point Info (N)" to a FIXED
+        # 16-row Master stride (module N -> Master rows 2+16(N-1)..). That only holds when
+        # every module is a full 16-zone block; with packed numbering an 8-port module
+        # shifts every later module off its stride. Rewire each sheet to its module's
+        # ACTUAL zones: one data row (sheet rows 4..19) per zone, the last two flagged
+        # Supervisory, unused rows blanked so we never bleed the next module's zones in.
+        # (These edits survive _overlay_openpyxl_changes, which copies every worksheet XML.)
+        rsp_by_num = {rsp.number: rsp for rsp in design.rsps}
+        _PI_NUM_RE = re.compile(r"Point Info\s*\(?\s*(\d+)")
+        for sheet_name in wb.sheetnames:
+            if "Point Info" not in sheet_name:
+                continue
+            m = _PI_NUM_RE.search(sheet_name)
+            if not m:
+                continue
+            pi = wb[sheet_name]
+            rsp = rsp_by_num.get(int(m.group(1)))
+            sorted_zones = sorted(rsp.zones) if rsp else []
+            model = (getattr(rsp, "model", "") or "714-16") if rsp else "714-16"
+            for i in range(16):  # template data rows 4..19; row 20 is the "Source:" label
+                row = 4 + i
+                if i < len(sorted_zones):
+                    mrow = zone_to_row.get(sorted_zones[i])
+                    pi[f"A{row}"] = f"=Master!A{mrow}" if mrow else None
+                    pi[f"B{row}"] = f"=Master!B{mrow}" if mrow else None
+                    pi[f"D{row}"] = 1
+                    pi[f"F{row}"] = "Supervisory" if i >= len(sorted_zones) - 2 else "Motion"
+                else:
+                    pi[f"A{row}"] = None
+                    pi[f"B{row}"] = None
+                    pi[f"D{row}"] = None
+                    pi[f"F{row}"] = None
+            if rsp:
+                pi["A20"] = f"Source: DMP {model} Expander #{rsp.number}"
 
     # Write the school address as workbook custom doc properties — invisible in
     # Excel's sheet UI but readable by parse_dmp_worksheet via wb.custom_doc_props.
