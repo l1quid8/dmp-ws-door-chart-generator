@@ -48,6 +48,7 @@ from session import (  # noqa: E402
     pending_recovery,
     save_session,
     sync_master_zones,
+    unique_session_path,
     write_recovery,
 )
 
@@ -170,6 +171,23 @@ def test_save_load_session(tmp_sessions_dir):
     assert loaded.source_name == "DARBY_INTRUSION_DESIGN.pdf"
     assert loaded.saved_at is not None
     assert loaded.path == path
+
+
+def test_unique_session_path_avoids_overwriting_existing_project(tmp_sessions_dir):
+    """Importing a worksheet for a school that already has a saved project must not
+    clobber it — the new project gets a ' (2)', ' (3)', … suffix instead."""
+    d = _populated_design()
+    base = default_session_path(d)
+    assert unique_session_path(d) == base          # nothing on disk -> default slot
+
+    base.write_text("{}", encoding="utf-8")          # existing project for this school
+    p2 = unique_session_path(d)
+    assert p2 != base and not p2.exists()
+    assert p2.stem.endswith("(2)") and p2.suffix == ".dmps"
+
+    p2.write_text("{}", encoding="utf-8")
+    p3 = unique_session_path(d)
+    assert p3.stem.endswith("(3)")
 
 
 def test_newer_schema_rejected(tmp_sessions_dir):

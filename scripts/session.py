@@ -85,6 +85,25 @@ def default_session_path(design: DMPDesign) -> Path:
     return sessions_dir() / f"{_slugify(design.site_info.school_name or '')}{SESSION_EXT}"
 
 
+def unique_session_path(design: DMPDesign) -> Path:
+    """A session path for a brand-new project that won't clobber an existing save.
+
+    Importing a worksheet (.xlsx) starts a *new* project, but default_session_path
+    keys only on the school name — so a second project for the same school would
+    overwrite the first. When the default slot is already taken on disk, fall back
+    to ' (2)', ' (3)', … leaving the prior project's .dmps intact.
+    """
+    base = default_session_path(design)
+    if not base.exists():
+        return base
+    n = 2
+    while True:
+        cand = base.parent / f"{base.stem} ({n}){base.suffix}"
+        if not cand.exists():
+            return cand
+        n += 1
+
+
 def recovery_path(session_path: Path) -> Path:
     return session_path.parent / (session_path.name + RECOVERY_SUFFIX)
 

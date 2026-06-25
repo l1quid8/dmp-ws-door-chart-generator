@@ -161,6 +161,19 @@ def parse_dmp_worksheet(xlsx_path: str | Path) -> DMPDesign:
 
     if "Master" in wb.sheetnames:
         design.master_zones = _parse_master_zones(wb["Master"], design.rsps)
+        # Field techs sometimes type room corrections straight into Point Info cells
+        # (overwriting the `=Master!B{row}` formula) but never update the Master sheet.
+        # Those hand-typed literals are the authoritative field data, so fold them into
+        # the Master zones the rest of the app consumes (Point Info wins). Needs a second
+        # load with data_only=False so formulas are visible as their `=...` text and can
+        # be told apart from literal overrides.
+        fwb = openpyxl.load_workbook(str(xlsx_path), data_only=False)
+        try:
+            overrides = _point_info_overrides(fwb)
+        finally:
+            fwb.close()
+        if overrides:
+            _apply_overrides_to_master_zones(design.master_zones, overrides, design.rsps)
 
     if "DMP 505-12_G Power Supply 1-10" in wb.sheetnames:
         design.power_supplies = _parse_power_supplies(wb["DMP 505-12_G Power Supply 1-10"])
@@ -462,6 +475,81 @@ import re as _re_for_zones  # noqa: E402 — placed here to keep top-of-file imp
 
 _PS_AC_RE = _re_for_zones.compile(r"^PS-(\d+):\s*A/?C", _re_for_zones.IGNORECASE)
 _PS_BATT_RE = _re_for_zones.compile(r"^PS-(\d+):\s*BATT", _re_for_zones.IGNORECASE)
+
+# Point Info column A normally holds `=Master!A{row}`; the row pins each point to its
+# Master zone even when a tech has typed a literal over column B's `=Master!B{row}`.
+_MASTER_A_REF_RE = _re_for_zones.compile(r"^=\s*Master!A(\d+)\s*$", _re_for_zones.IGNORECASE)
+
+
+def _point_info_overrides(wb) -> dict[int, str]:
+    """Zone number -> hardcoded location text for Point Info col-B cells that were
+    typed over their `=Master!B{row}` formula (field corrections made directly in Excel).
+
+    Scoped to current-format sheets: a row only counts when column A is a
+    `=Master!A{row}` formula (which the generator always writes), and only a plain
+    literal in column B (not a formula, not blank) is treated as an override. `wb` must
+    be loaded with ``data_only=False`` so formulas appear as their ``=...`` text.
+    """
+    overrides: dict[int, str] = {}
+    if "Master" not in wb.sheetnames:
+        return overrides
+    master = wb["Master"]
+    for sheet_name in wb.sheetnames:
+        if "DMP 714-16 Point Info" not in sheet_name:
+            continue
+        ws = wb[sheet_name]
+        for row in range(4, 20):
+            a = ws.cell(row, 1).value
+            if not isinstance(a, str):
+                continue
+            m = _MASTER_A_REF_RE.match(a.strip())
+            if not m:
+                continue  # legacy / non-standard layout — leave to the normal parse
+            b = ws.cell(row, 2).value
+            if not isinstance(b, str) or b.startswith("="):
+                continue  # still a formula (or non-text) — not an override
+            text = b.strip()
+            if not text:
+                continue
+            mrow = int(m.group(1))
+            z_label = master.cell(mrow, 1).value  # literal, e.g. "Z518"
+            if not isinstance(z_label, str):
+                continue
+            z_label = z_label.strip()
+            if z_label.startswith("Z") and z_label[1:].isdigit():
+                overrides[int(z_label[1:])] = text
+    return overrides
+
+
+def _apply_overrides_to_master_zones(master_zones: list[Zone],
+                                     overrides: dict[int, str],
+                                     rsps: list[RSP]) -> None:
+    """Point Info wins: rewrite each matching Master zone's description from the
+    hardcoded override and recompute its spare / PS flags from the new text (same
+    rules as ``_parse_master_zones``). A real-room override on a SPARE zone clears
+    ``is_spare`` and re-derives its owning RSP from the zone ranges; a re-typed PS
+    label restores the supervisory flags and rsp_number from the ``PS-N:`` prefix.
+    """
+    by_number = {z.number: z for z in master_zones}
+    zone_to_rsp = {z: r.number for r in rsps for z in r.zones}
+    for num, text in overrides.items():
+        z = by_number.get(num)
+        if z is None:
+            continue
+        z.description = text
+        m_ac = _PS_AC_RE.match(text)
+        m_batt = _PS_BATT_RE.match(text)
+        z.is_spare = text.upper() == "SPARE"
+        z.is_ps_ac = bool(m_ac)
+        z.is_ps_batt = bool(m_batt)
+        if m_ac:
+            z.rsp_number = int(m_ac.group(1))
+        elif m_batt:
+            z.rsp_number = int(m_batt.group(1))
+        elif z.is_spare:
+            z.rsp_number = None
+        else:
+            z.rsp_number = zone_to_rsp.get(num)
 
 
 def _parse_master_zones(ws, rsps: list[RSP]) -> list[Zone]:
