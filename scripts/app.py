@@ -41,6 +41,7 @@ from session import (
     normalize_zone_descriptions,
     pending_recovery,
     sync_master_zones,
+    unique_session_path,
 )
 from editor_frame import EditorFrame
 import updater
@@ -1116,22 +1117,16 @@ class App:
                     title="Not a DMP worksheet",
                 )
                 return
-            if getattr(design, "dmp_status", "") == "DRAFT":
-                school = design.site_info.school_name or "this school"
-                self.state = "idle"
-                self.dmp_path = None
-                self._show_parse_error(
-                    ValueError(
-                        "This is a DRAFT export — drafts can't be re-imported. "
-                        f"Open the saved project for {school} instead."
-                    ),
-                    title="Draft worksheet refused",
-                )
-                return
+            # Importing a worksheet starts a NEW project from that file. Give it a
+            # unique session path so it never overwrites an existing saved project for
+            # the same school (default_session_path keys only on the school name).
+            # Drafts are accepted: a worksheet hand-finalized in Excel by a third party
+            # keeps its hidden DMPStatus=DRAFT flag, and the operator still needs it.
             school = design.site_info.school_name or "Unknown"
             self._show_file_card(xlsx_path.name, parsing=False, school_name=school)
             self._enter_editor(Session(design=design, source_kind="xlsx",
-                                       source_name=xlsx_path.name))
+                                       source_name=xlsx_path.name,
+                                       path=unique_session_path(design)))
 
         def on_error(exc):
             if self.state != "loading_xlsx":
@@ -1357,7 +1352,11 @@ class App:
         out_dir = self.output_dir
 
         def work():
-            ensure_searchable_pdf(pdf_path)
+            # PDF prep only applies when the source was a PDF. An imported worksheet
+            # (source_kind == "xlsx") has no pdf_path — the FINAL worksheet is written
+            # straight from the in-memory design, so skip the OCR/searchable step.
+            if pdf_path is not None:
+                ensure_searchable_pdf(pdf_path)
             school_slug = _slugify(design.site_info.school_name or "output")
             out_dir.mkdir(parents=True, exist_ok=True)
             out_name = dmp_filename(school_slug, stamp="FINAL")

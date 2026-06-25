@@ -33,6 +33,7 @@ import openpyxl
 from openpyxl.workbook.properties import CalcProperties
 
 from parse_dmp_worksheet import DMPDesign, Splitter, RSP
+from hardware import zone_block_for
 
 
 # Mapping: zone number → master row (bus-aligned)
@@ -43,6 +44,177 @@ def zone_to_master_row(zone_num: int) -> int:
     # Linear: zone N (501..996) → row 67 + (N - 501). Door chart Master sheet's
     # zone area starts at row 67 and runs to row 562.
     return 67 + (zone_num - 501)
+
+
+# The door chart's presentation tabs (Terminal Cans, RSPs, Power Supplies) read the
+# Master data sheet at FIXED 16-row block anchors — one block per expander module,
+# regardless of whether the module is a 16-port (714-16) or 8-port (714-8). The anchor
+# for module N is the row where N's nominal 16-zone block (zone_block_for) starts.
+def rsp_block_anchor(rsp_number: int) -> int:
+    """Master row where module `rsp_number`'s presentation block starts (e.g. 1->67,
+    2->83, 3->99, 7->167 across the bus jump)."""
+    return 67 + (min(zone_block_for(rsp_number)) - 501)
+
+
+# -------- surgical presentation edits --------
+#
+# The Master data sheet is a clean CONTIGUOUS zone list (zone N → row zone_to_master_row).
+# The presentation tabs' fixed block anchors only line up with that when every module is
+# 16-port; each 8-port module shifts every later block's source rows by 8. So we retarget
+# each block's =Master! references to its RSP's real contiguous rows (and reshape 8-port
+# blocks). The presentation sheets carry <tablePart>/<drawing> rels that openpyxl drops on
+# re-save, so we edit their worksheet XML in place (preserving every other byte).
+
+def _find_cell(xml: str, ref: str):
+    """Match the full <c r="REF" ...>…</c> (or self-closing) element for cell REF.
+
+    The two branches keep a styled self-closing cell (``<c r="B5" s="3"/>``) from being
+    over-consumed into the next cell's </c>: the first alternative captures the cell's own
+    ``/>``; only a real content cell falls through to ``>…</c>``.
+    """
+    return re.search(r'<c r="%s"(?:[^>]*?/>|[^>]*?>.*?</c>)' % re.escape(ref), xml, re.S)
+
+
+def _blank_cell(xml: str, ref: str) -> str:
+    """Replace cell REF with an empty cell, preserving its style index."""
+    m = _find_cell(xml, ref)
+    if not m:
+        return xml
+    sm = re.search(r'\bs="(\d+)"', m.group(0))
+    style = f' s="{sm.group(1)}"' if sm else ""
+    return xml[:m.start()] + f'<c r="{ref}"{style}/>' + xml[m.end():]
+
+
+def _move_cell(xml: str, src_ref: str, dst_ref: str) -> str:
+    """Copy src cell's content+style into dst (overwriting dst), keeping src as-is.
+
+    Caller blanks src afterward. Used to lift the AUX POWER labels up the block.
+    """
+    ms = _find_cell(xml, src_ref)
+    md = _find_cell(xml, dst_ref)
+    if not ms or not md:
+        return xml
+    new = re.sub(r'^<c r="%s"' % re.escape(src_ref), f'<c r="{dst_ref}"', ms.group(0))
+    return xml[:md.start()] + new + xml[md.end():]
+
+
+def _set_cell_master_row(xml: str, ref: str, new_row: int) -> str:
+    """Set the row of every =Master!X{row} reference in cell `ref` to `new_row` (keeping
+    the column letter). Robust to irregular templates whose cells reference arbitrary rows.
+
+    The cached <v> is left stale; inject sets fullCalcOnLoad + drops calcChain so Excel
+    recomputes on open (same contract the rest of these formula sheets rely on).
+    """
+    m = _find_cell(xml, ref)
+    if not m or "Master!" not in m.group(0):
+        return xml
+    cell = re.sub(r'Master!([A-Z]+)\d+',
+                  lambda mm: f"Master!{mm.group(1)}{new_row}", m.group(0))
+    return xml[:m.start()] + cell + xml[m.end():]
+
+
+def _retarget_zone_tab(xml: str, kind: str, dmp_design: DMPDesign) -> str:
+    """Retarget every block in Terminal Cans ('tc') or RSPs ('rsps') to its RSP's real
+    contiguous Master rows; reshape 8-port blocks; blank unused blocks.
+
+    Blocks are matched by VISUAL ORDER (the i-th block top-to-bottom, left-before-right, is
+    RSP i+1) and each block's own header formula gives its current anchor — the RSPs tab's
+    template uses an irregular anchor sequence, so anchor-based matching is not reliable.
+
+    Geometry: header at R, then data rows starting R+data_off (16 slots), and (Terminal
+    Cans only) an AUX POWER row at R+18.
+    """
+    master_col = "D" if kind == "tc" else "C"
+    data_off = 2 if kind == "tc" else 3
+    has_aux = kind == "tc"
+
+    # All block headers, in reading order (header cells live in col B (left) / F (right)).
+    blocks = [(int(m.group(2)), m.group(1), int(m.group(3)))
+              for m in re.finditer(
+                  r'<c r="([BF])(\d+)"[^>]*?><f>Master!%s(\d+)</f>' % master_col, xml)]
+    blocks.sort(key=lambda b: (b[0], 0 if b[1] == "B" else 1))
+    rsps = sorted(dmp_design.rsps, key=lambda r: r.number)
+
+    for i, (R, col_letter, anchor) in enumerate(blocks):
+        cols = ("B", "C", "D") if col_letter == "B" else ("F", "G", "H")
+
+        if i >= len(rsps):
+            # Unused module slot — blank the summary title (R), data rows and the static
+            # AUX/PS footer, leaving an empty table. R+1 is the block's Excel Table HEADER
+            # row ("Pin 1/Pin 2/Description" …); blanking it empties a header cell the
+            # table part still names, which Excel flags as corrupt ("recover?"). Skip it.
+            for r in range(R, R + 19):
+                if r == R + 1:
+                    continue
+                for col in cols:
+                    xml = _blank_cell(xml, f"{col}{r}")
+            continue
+
+        zs = sorted(rsps[i].zones)
+        n = len(zs)
+
+        # Header row R → the RSP's first zone row; each data position k → the row of that
+        # RSP's k-th zone. Set rows directly (template data refs are unreliable). The header
+        # is a merged cell (formula in col c1) but we sweep all three columns defensively.
+        for col in cols:
+            xml = _set_cell_master_row(xml, f"{col}{R}", zone_to_master_row(zs[0]))
+        for k in range(n):
+            target = zone_to_master_row(zs[k])
+            for col in cols:
+                xml = _set_cell_master_row(xml, f"{col}{R + data_off + k}", target)
+
+        if n >= 16:
+            continue
+        # 8-port: only n real rows. Terminal Cans lifts AUX POWER to just below them.
+        if has_aux:
+            aux_dst = R + data_off + n
+            for col in cols:
+                xml = _move_cell(xml, f"{col}{R + 18}", f"{col}{aux_dst}")
+            blank_from = aux_dst + 1
+        else:
+            blank_from = R + data_off + n
+        for r in range(blank_from, R + 19):
+            for col in cols:
+                xml = _blank_cell(xml, f"{col}{r}")
+    return xml
+
+
+def _retarget_power_supplies(xml: str, dmp_design: DMPDesign) -> str:
+    """The Power Supplies tab reads each module's supervisory pair from the 16-port slot
+    positions =Master!{C,A}{anchor+14} / A{anchor+15}. Retarget those to each RSP's real
+    supervisory rows (the last two of its sorted zones); blank unused modules' cells.
+    """
+    rsp_by_num = {r.number: r for r in dmp_design.rsps}
+    remap: dict[str, str] = {}   # original ref -> retargeted ref (real RSPs)
+    blank_refs: set[str] = set()  # refs whose containing cell should be blanked (unused)
+    for M in range(1, 61):
+        anchor = rsp_block_anchor(M)
+        olds = [f"Master!C{anchor + 14}", f"Master!A{anchor + 14}", f"Master!A{anchor + 15}"]
+        rsp = rsp_by_num.get(M)
+        if rsp is None:
+            blank_refs.update(olds)
+            continue
+        zs = sorted(rsp.zones)
+        ac, batt = zone_to_master_row(zs[-2]), zone_to_master_row(zs[-1])
+        remap[olds[0]] = f"Master!C{ac}"
+        remap[olds[1]] = f"Master!A{ac}"
+        remap[olds[2]] = f"Master!A{batt}"
+
+    # Blank unused modules' cells: one O(n) sweep over all cells, collect those that
+    # reference an unused slot, then blank each. (No content-search loop — that backtracks.)
+    if blank_refs:
+        to_blank = [cm.group(1) for cm in
+                    re.finditer(r'<c r="([A-Z]+\d+)"(?:[^>]*?/>|[^>]*?>.*?</c>)', xml, re.S)
+                    if any(b in cm.group(0) for b in blank_refs)]
+        for ref in to_blank:
+            xml = _blank_cell(xml, ref)
+
+    # Retarget real refs in a single pass (callback reads the ORIGINAL ref, so a retargeted
+    # value can never be re-mapped into another block's row).
+    if remap:
+        xml = re.sub(r'Master![AC]\d+(?=\D)',
+                     lambda m: remap.get(m.group(0), m.group(0)), xml)
+    return xml
 
 
 def _find_rsp(rsps: list[RSP], number: int) -> RSP | None:
@@ -214,39 +386,51 @@ def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> Non
     if dmp_design.site_info.address_line2:
         header["B5"] = dmp_design.site_info.address_line2
 
-    # 2. Master sheet — zone area (rows 67-562)
+    # 2. Master sheet — zone area (rows 67-562). A clean CONTIGUOUS zone list: zone N at
+    # zone_to_master_row(N). The presentation tabs are retargeted to these rows later.
     master = wb["Master"]
     n_rooms = 0
     n_spares = 0
     n_ps = 0
-    rsp_first_zone_filled: dict[int, bool] = {}
+
+    # Clear the whole zone area first so no template placeholder/garbage tail survives.
+    for r in range(67, 563):
+        for col in ("A", "B", "C", "D"):
+            master[f"{col}{r}"] = None
+
+    # Only real zones (those owned by an actual RSP module) get written — the worksheet's
+    # Master can carry PS-N placeholder rows for modules that don't exist.
+    rsp_zone_set = {z for rsp in dmp_design.rsps for z in rsp.zones}
 
     for z in dmp_design.master_zones:
+        if rsp_zone_set and z.number not in rsp_zone_set:
+            continue
         row = zone_to_master_row(z.number)
         if row == 0:
             continue
-
-        # Col B — zone description (already formatted in the DMP)
+        master[f"A{row}"] = f"Z{z.number}"      # clean label column
         master[f"B{row}"] = z.description
 
         if z.is_spare:
             n_spares += 1
             continue
-
         if z.is_ps_ac or z.is_ps_batt:
             n_ps += 1
             rsp = _find_rsp(dmp_design.rsps, z.rsp_number) if z.rsp_number else None
             if rsp and rsp.location:
                 master[f"C{row}"] = format_ps_supervisory_location(rsp)
             continue
-
         n_rooms += 1
-        if z.rsp_number is not None and not rsp_first_zone_filled.get(z.rsp_number):
-            rsp = _find_rsp(dmp_design.rsps, z.rsp_number)
-            if rsp and rsp.location:
-                master[f"C{row}"] = format_rsp_location(rsp)
-                master[f"D{row}"] = format_66_block_location(rsp)
-                rsp_first_zone_filled[z.rsp_number] = True
+
+    # RSP block headers — the Terminal Cans / RSPs tabs read Master!D / Master!C of each
+    # block's first row for the per-block titles. Write them at the RSP's first contiguous
+    # zone row (the retarget step points the header formulas here).
+    for rsp in dmp_design.rsps:
+        if not rsp.location or not rsp.zones:
+            continue
+        r = zone_to_master_row(min(rsp.zones))
+        master[f"C{r}"] = format_rsp_location(rsp)
+        master[f"D{r}"] = format_66_block_location(rsp)
 
     # 3. XR-550 CONFIG + SPLITTER TOPOLOGY (always populated)
     n_xr550_cells = _populate_xr550_config(master, dmp_design)
@@ -279,6 +463,16 @@ def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> Non
         "xl/workbook.xml",           # fullCalcOnLoad=True flag
     }
     DROP_FILES = {"xl/calcChain.xml"}
+
+    # Retarget the presentation tabs to the contiguous Master: each RSP block points to
+    # its real rows, 8-port blocks are reshaped (8 rows → AUX → blanks), and unused module
+    # blocks are blanked. In-place XML edits keep each sheet's <tablePart>/<drawing> intact.
+    #   sheet4 = Terminal Cans, sheet5 = RSPs, sheet6 = Power Supplies
+    PRESENTATION_REWRITERS = {
+        "xl/worksheets/sheet4.xml": lambda x: _retarget_zone_tab(x, "tc", dmp_design),
+        "xl/worksheets/sheet5.xml": lambda x: _retarget_zone_tab(x, "rsps", dmp_design),
+        "xl/worksheets/sheet6.xml": lambda x: _retarget_power_supplies(x, dmp_design),
+    }
 
     with NamedTemporaryFile(delete=False, suffix=".xlsx") as tmpf:
         openpyxl_tmp_path = Path(tmpf.name)
@@ -320,6 +514,10 @@ def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> Non
                         rels,
                     )
                     zout.writestr(item, rels.encode("utf-8"))
+                    continue
+                if item in PRESENTATION_REWRITERS:
+                    xml = zin.read(item).decode("utf-8")
+                    zout.writestr(item, PRESENTATION_REWRITERS[item](xml).encode("utf-8"))
                     continue
                 data = overlays.get(item, zin.read(item))
                 zout.writestr(item, data)
