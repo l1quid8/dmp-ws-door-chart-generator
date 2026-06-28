@@ -236,6 +236,24 @@ def format_ps_supervisory_location(rsp: RSP) -> str:
     return f"{rsp.location} - Power Supply #{rsp.number}"
 
 
+def format_section_title(s: Splitter) -> str:
+    """SPLITTER TOPOLOGY SECTION TITLE (Master col C): the block header shown per splitter
+    on the LX-KP-710s sheet — '<location> - 710 Splitter <bus> - <id>'.
+
+    LX bus number (500/600/700/800/900) is parsed from the slot id '710-LX{nnn}-N'; KP
+    splitters have no bus number and read '710 Splitter Keypad Bus'.
+    """
+    m = re.search(r"LX(\d{3})", s.id)
+    if m:
+        bus = f"LX Bus {m.group(1)}"
+    elif s.splitter_type == "KP":
+        bus = "Keypad Bus"
+    else:
+        bus = f"{s.splitter_type} Bus"
+    parts = [p for p in [(s.location or "").strip(), f"710 Splitter {bus}", s.id] if p]
+    return " - ".join(parts)
+
+
 # -------- XR-550 CONFIG and SPLITTER TOPOLOGY population --------
 
 
@@ -331,10 +349,10 @@ def _populate_splitter_topology(master, dmp_design: DMPDesign) -> tuple[int, int
             master[f"B{row}"] = s.location
             n_cells += 1
 
-        # Col C — SECTION TITLE (joined input descriptions, useful for at-a-glance routing)
-        section_parts = [v for v in s.inputs.values() if v]
-        if section_parts:
-            master[f"C{row}"] = " | ".join(section_parts)
+        # Col C — SECTION TITLE: "<location> - 710 Splitter <bus> - <id>"
+        title = format_section_title(s)
+        if title:
+            master[f"C{row}"] = title
             n_cells += 1
 
         # Col D — COMBUS INPUT (the primary input description)
