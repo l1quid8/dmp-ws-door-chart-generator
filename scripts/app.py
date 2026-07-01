@@ -17,10 +17,9 @@ from tkinterdnd2 import TkinterDnD, DND_FILES
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from paths import resource_path, output_dir
+from paths import resource_path, output_dir, next_rev_path, latest_rev_path
 from generate_dmp_ws import (
     build_dmp_design_from_pdf,
-    dmp_filename,
     write_dmp_xlsx,
     ensure_searchable_pdf,
     resolve_original_pdf,
@@ -69,7 +68,7 @@ checked it against the riser diagram (required before FINAL).
    • KEYPADS — each keypad's location and source (MSP or a KP splitter).
    • POWER — RSP / power-supply locations; add or remove expanders here.
 
-   Naming rules the finalize gate enforces: SPARE must be uppercase, and RSP references \
+   Naming rules the checks enforce: SPARE must be uppercase, and RSP references \
 must be hyphenated (RSP-3, not RSP 3).
 
 3. SAVE
@@ -77,12 +76,13 @@ must be hyphenated (RSP-3, not RSP 3).
 mean you have edits that aren't on disk yet. A background recovery file guards against \
 crashes between saves.
 
-4. EXPORT DRAFT  (anytime)
-   Produces a worksheet stamped DRAFT / NOT FOR INSTALL. Drafts can't be re-imported.
-
-5. FINALIZE
-   Runs a validation gate. Errors block; warnings allow. When it passes it generates the \
-FINAL worksheet, and from that the door chart.
+4. GENERATE  (repeat as needed)
+   Two buttons at the bottom of the editor: "Generate Worksheet" and "Generate Door \
+Chart" (the chart is built from the newest worksheet). Each run writes the next revision \
+— school_dmp_rev1.xlsx, rev2, … — keeping earlier revisions, so the normal loop is: \
+generate, print, review with the superintendent, edit, regenerate. If checks are failing \
+you'll see a summary first, but generation is never blocked. You stay in the editor the \
+whole time; a notification offers to open the finished file.
 
 Hardware changes (post-CAD): you can add or remove expanders, splitters, and keypads. \
 Removing hardware re-points anything that fed it to "Spare" and unsources affected \
@@ -175,11 +175,12 @@ class App:
         self.session: Session | None = None
         self.editor: EditorFrame | None = None
 
-        # Dual-gate: state advances only when BOTH animation AND pipeline finish
-        self._anim_done = False
-        self._pipe_done = False
-        self._pipe_result = None
-        self._pipe_error = None
+        # Which artifact is generating right now: "worksheet" | "chart" | None.
+        # Generation runs in the background while the editor stays up.
+        self._generating: str | None = None
+        # editor.edit_epoch at the moment the last worksheet was generated —
+        # lets the door-chart action warn when the worksheet has gone stale.
+        self._ws_epoch: int | None = None
 
         self._spinner_jobs: list[str] = []
 
@@ -203,8 +204,8 @@ class App:
         self.root.bind_all(f"<{mod}-n>", lambda _e=None: self._process_another())
         self.root.bind_all(f"<{mod}-o>", lambda _e=None: self._choose_pdf())
         self.root.bind_all(f"<{mod}-w>", lambda _e=None: self._process_another())
-        self.root.bind_all(f"<{mod}-e>", lambda _e=None: self._export_draft())
-        self.root.bind_all(f"<{mod}-Shift-F>", lambda _e=None: self._finalize_clicked())
+        self.root.bind_all(f"<{mod}-e>", lambda _e=None: self._generate_worksheet())
+        self.root.bind_all(f"<{mod}-d>", lambda _e=None: self._generate_door_chart())
 
         try:
             self.root.drop_target_register(DND_FILES)
@@ -323,10 +324,10 @@ class App:
         ws_menu = tk.Menu(self._menubar, tearoff=0,
                           postcommand=self._refresh_worksheet_menu)
         self._worksheet_menu = ws_menu
-        ws_menu.add_command(label="Export Draft", accelerator=accel("E"),
-                            command=self._export_draft)
-        ws_menu.add_command(label="Finalize…", accelerator=accel("Shift+F"),
-                            command=self._finalize_clicked)
+        ws_menu.add_command(label="Generate Worksheet", accelerator=accel("E"),
+                            command=self._generate_worksheet)
+        ws_menu.add_command(label="Generate Door Chart", accelerator=accel("D"),
+                            command=self._generate_door_chart)
         self._menubar.add_cascade(label="Worksheet", menu=ws_menu)
 
         # ---- Help (always present — lowers the README-dependence) ----
@@ -369,11 +370,14 @@ class App:
             )
 
     def _refresh_worksheet_menu(self):
-        """Enable the worksheet actions only while a project is open."""
-        editing = self.state == "editing" and self.editor is not None
-        state = "normal" if editing else "disabled"
-        self._worksheet_menu.entryconfigure("Export Draft", state=state)
-        self._worksheet_menu.entryconfigure("Finalize…", state=state)
+        """Enable the worksheet actions only while a project is open and idle."""
+        idle = (self.state == "editing" and self.editor is not None
+                and self._generating is None)
+        self._worksheet_menu.entryconfigure(
+            "Generate Worksheet", state="normal" if idle else "disabled")
+        can_chart = idle and self._latest_worksheet_path() is not None
+        self._worksheet_menu.entryconfigure(
+            "Generate Door Chart", state="normal" if can_chart else "disabled")
 
     def _build_toolbar(self):
         bar = ctk.CTkFrame(self.root, fg_color=("gray95", "gray15"),
@@ -538,10 +542,6 @@ class App:
         """Show the centered flow column (and hide the editor surface)."""
         self.editor_section.grid_remove()
         self.flow.grid(row=0, column=0, sticky="n")
-
-    def _finalize_clicked(self):
-        if self.state == "editing" and self.editor:
-            self.editor.show_finalize_dialog()
 
     # ------------------------------------------------------------------ #
     # Section 1 — Input                                                     #
@@ -763,202 +763,6 @@ class App:
             self._output_dir_label.configure(text=str(self.output_dir))
 
     # ------------------------------------------------------------------ #
-    # Section 3 — Action region                                            #
-    # ------------------------------------------------------------------ #
-
-    def _clear_action_section(self):
-        for w in self.action_section.winfo_children():
-            w.destroy()
-        self._show_flow()
-        self.action_section.grid(row=1, column=0, sticky="ew", pady=(16, 0))
-
-    def _show_action_generating_dmp(self, steps: list[str]):
-        self._clear_action_section()
-
-        ctk.CTkLabel(
-            self.action_section,
-            text="Generating DMP Worksheet",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
-
-        cl_frame = ctk.CTkFrame(self.action_section, fg_color="transparent")
-        cl_frame.grid(row=1, column=0, sticky="ew")
-        self._run_checklist(cl_frame, steps, self._on_dmp_anim_done)
-
-    def _show_action_review_dmp(self, header: str = "Review DMP Worksheet",
-                                btn1_text: str = "Open DMP in Excel",
-                                btn2_text: str = "Looks good — generate door chart",
-                                note: str = ""):
-        self._clear_action_section()
-
-        ctk.CTkLabel(
-            self.action_section,
-            text=header,
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 12 if not note else 4))
-
-        if note:
-            ctk.CTkLabel(
-                self.action_section,
-                text=note,
-                font=ctk.CTkFont(size=11),
-                text_color=ACCENT,
-                anchor="w",
-                justify="left",
-                wraplength=520,
-            ).grid(row=1, column=0, sticky="w", pady=(0, 12))
-
-        btn_row = ctk.CTkFrame(self.action_section, fg_color="transparent")
-        btn_row.grid(row=2, column=0, sticky="ew")
-        btn_row.columnconfigure(0, weight=1)
-        btn_row.columnconfigure(1, weight=1)
-
-        ctk.CTkButton(
-            btn_row,
-            text=btn1_text,
-            height=40,
-            fg_color="transparent",
-            border_width=2,
-            border_color=ACCENT,
-            text_color=ACCENT,
-            hover_color=("gray90", "gray25"),
-            command=lambda: self._open_with_toast(self.dmp_path),
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-
-        ctk.CTkButton(
-            btn_row,
-            text=btn2_text,
-            height=40,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-            font=ctk.CTkFont(weight="bold"),
-            command=self._start_generating_chart,
-        ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
-
-    def _show_action_generating_chart(self, steps: list[str]):
-        self._clear_action_section()
-
-        ctk.CTkLabel(
-            self.action_section,
-            text="Generating Door Chart",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
-
-        cl_frame = ctk.CTkFrame(self.action_section, fg_color="transparent")
-        cl_frame.grid(row=1, column=0, sticky="ew")
-        self._run_checklist(cl_frame, steps, self._on_chart_anim_done)
-
-    def _show_action_done(self):
-        self._clear_action_section()
-
-        banner = ctk.CTkFrame(self.action_section, fg_color="#ecfaef", corner_radius=10)
-        banner.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        banner.columnconfigure(1, weight=1)
-
-        check_bg = ctk.CTkFrame(banner, fg_color="#34c759", corner_radius=14, width=28, height=28)
-        check_bg.grid(row=0, column=0, padx=(16, 10), pady=16)
-        check_bg.grid_propagate(False)
-        ctk.CTkLabel(check_bg, text="✓", text_color="white", font=ctk.CTkFont(size=14, weight="bold")).place(
-            relx=0.5, rely=0.5, anchor="center"
-        )
-
-        info = ctk.CTkFrame(banner, fg_color="transparent")
-        info.grid(row=0, column=1, sticky="w", pady=16)
-        ctk.CTkLabel(info, text="Done!", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w")
-        ctk.CTkLabel(
-            info,
-            text=f"Both files written to {self.output_dir}",
-            font=ctk.CTkFont(family="Courier", size=11),
-            text_color="gray50",
-            wraplength=460,
-            justify="left",
-        ).pack(anchor="w")
-
-        btn_row = ctk.CTkFrame(self.action_section, fg_color="transparent")
-        btn_row.grid(row=1, column=0, sticky="ew")
-        for col in range(3):
-            btn_row.columnconfigure(col, weight=1)
-
-        ctk.CTkButton(
-            btn_row,
-            text="Open DMP",
-            height=38,
-            fg_color="transparent",
-            border_width=2,
-            border_color=ACCENT,
-            text_color=ACCENT,
-            hover_color=("gray90", "gray25"),
-            command=lambda: self._open_with_toast(self.dmp_path),
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-
-        ctk.CTkButton(
-            btn_row,
-            text="Open Door Chart",
-            height=38,
-            fg_color="transparent",
-            border_width=2,
-            border_color=ACCENT,
-            text_color=ACCENT,
-            hover_color=("gray90", "gray25"),
-            command=lambda: self._open_with_toast(self.door_chart_path),
-        ).grid(row=0, column=1, sticky="ew", padx=4)
-
-        ctk.CTkButton(
-            btn_row,
-            text="Process another →",
-            height=38,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-            command=self._process_another,
-        ).grid(row=0, column=2, sticky="ew", padx=(4, 0))
-
-    def _show_action_error(self, title: str, exc: Exception, retry):
-        self._clear_action_section()
-        self._make_error_card(self.action_section, title, exc, retry)
-
-    # ------------------------------------------------------------------ #
-    # Animated checklist                                                    #
-    # ------------------------------------------------------------------ #
-
-    def _run_checklist(self, container: ctk.CTkFrame, steps: list[str], on_done):
-        STEP_INTERVAL = 480
-        PENDING_DURATION = 320
-        spinner_labels: list[ctk.CTkLabel] = []
-
-        def _append_pending(i: int):
-            if not container.winfo_exists():
-                return
-            row = ctk.CTkFrame(container, fg_color="transparent")
-            row.pack(anchor="w", pady=2)
-            spin_idx = [0]
-            sp = ctk.CTkLabel(row, text=SPINNER_FRAMES[0], text_color="gray50",
-                              font=ctk.CTkFont(size=13), width=20)
-            sp.pack(side="left")
-            ctk.CTkLabel(row, text=steps[i], font=ctk.CTkFont(size=12)).pack(side="left", padx=4)
-            spinner_labels.append(sp)
-
-            def _spin():
-                if not sp.winfo_exists():
-                    return
-                spin_idx[0] += 1
-                sp.configure(text=SPINNER_FRAMES[spin_idx[0] % len(SPINNER_FRAMES)])
-                job = self.root.after(80, _spin)
-                self._spinner_jobs.append(job)
-            _spin()
-
-        def _promote(i: int):
-            if i < len(spinner_labels) and spinner_labels[i].winfo_exists():
-                spinner_labels[i].configure(text="✓", text_color="#34c759")
-
-        for i in range(len(steps)):
-            delay = 0 if i == 0 else i * STEP_INTERVAL
-            self.root.after(delay, _append_pending, i)
-            self.root.after(delay + PENDING_DURATION, _promote, i)
-
-        total = (len(steps) - 1) * STEP_INTERVAL + PENDING_DURATION + 380
-        self.root.after(total, on_done)
-
-    # ------------------------------------------------------------------ #
     # Error card                                                            #
     # ------------------------------------------------------------------ #
 
@@ -992,11 +796,14 @@ class App:
         open_file(path)
         self._show_toast(f"Opening {path.name} in Excel…")
 
-    def _show_toast(self, message: str):
+    def _show_toast(self, message: str, action: tuple | None = None):
+        """Slide-in notification. `action` is an optional ("Label", callback)
+        button — used by generation completions ("rev 3 ready — Open"); a
+        toast with an action lingers longer so it can actually be clicked."""
         self.root.update_idletasks()
         rx, ry = self.root.winfo_x(), self.root.winfo_y()
         rw, rh = self.root.winfo_width(), self.root.winfo_height()
-        tw, th = 360, 48
+        tw, th = (440, 48) if action else (360, 48)
         tx = rx + (rw - tw) // 2
         ty_end = ry + rh - 70
         ty_start = ty_end + 20
@@ -1007,14 +814,27 @@ class App:
         toast.geometry(f"{tw}x{th}+{tx}+{ty_start}")
         toast.attributes("-alpha", 0.92)
         tk.Label(toast, text=message, bg="#1c1c1e", fg="white",
-                 font=("Helvetica", 12), padx=16, pady=12).pack(expand=True)
+                 font=("Helvetica", 12), padx=16, pady=12).pack(
+            side="left", expand=True, fill="x")
+        if action:
+            label, callback = action
+            tk.Button(
+                toast, text=label, relief="flat", borderwidth=0,
+                bg="#1c1c1e", fg="#8ab8f0", activebackground="#1c1c1e",
+                activeforeground="white", highlightthickness=0,
+                font=("Helvetica", 12, "bold"), cursor="pointinghand"
+                if sys.platform == "darwin" else "hand2",
+                command=lambda: (callback(),
+                                 toast.destroy() if toast.winfo_exists() else None),
+            ).pack(side="right", padx=(0, 14))
 
         steps = 8
         for i in range(steps + 1):
             y = int(ty_start + (ty_end - ty_start) * i / steps)
             self.root.after(int(i * 180 / steps),
                             lambda _y=y: toast.geometry(f"{tw}x{th}+{tx}+{_y}") if toast.winfo_exists() else None)
-        self.root.after(1800, lambda: toast.destroy() if toast.winfo_exists() else None)
+        linger = 6000 if action else 1800
+        self.root.after(linger, lambda: toast.destroy() if toast.winfo_exists() else None)
 
     # ------------------------------------------------------------------ #
     # Spinner helpers                                                       #
@@ -1127,12 +947,12 @@ class App:
         self._run_async(work, on_done, on_error)
 
     def _start_load_worksheet(self, xlsx_path: Path):
-        """Load an already-generated DMP worksheet (.xlsx) and jump straight to the
-        review/door-chart step, skipping PDF parsing and worksheet generation.
+        """Load an already-generated DMP worksheet (.xlsx) into the editor,
+        skipping PDF parsing.
 
-        The door-chart flow (_start_generating_chart) re-parses self.dmp_path from
-        disk, so any edits the user makes in Excel between here and 'Generate Door
-        Charts' are picked up automatically.
+        self.dmp_path points at the imported file, so 'Generate Door Chart' is
+        available immediately and builds from it as-is; generating a worksheet
+        revision re-points dmp_path at the new file.
         """
         self.dmp_path = xlsx_path
         self.pdf_path = None
@@ -1209,17 +1029,22 @@ class App:
         self.session = session
         self.parsed_design = session.design  # generation flows read this
         self.state = "editing"
+        self._ws_epoch = None  # no worksheet generated for this project yet
 
         self._teardown_editor()
         self.editor = EditorFrame(
             self.editor_section, self.root, session,
-            on_finalize=self._finalize_from_editor,
+            on_generate_worksheet=self._generate_worksheet,
+            on_generate_chart=self._generate_door_chart,
             on_status_change=self._on_editor_status,
             on_validation_change=self._on_editor_validation,
-            on_generate_charts=(self._charts_from_worksheet
-                                if session.source_kind == "xlsx" else None),
         )
         self.editor.grid(row=0, column=0, sticky="nsew")
+        if session.source_kind == "xlsx" and self.dmp_path is not None:
+            # The imported worksheet IS the design as of right now — treat it
+            # as in-sync so the door-chart staleness warning only fires for
+            # edits made after import.
+            self._ws_epoch = self.editor.edit_epoch
         if session.saved_at is None:
             # Fresh parse: seed the per-machine defaults the old form offered.
             self.editor.prefill_site_defaults(load_prefs())
@@ -1290,226 +1115,153 @@ class App:
             "terminal panel for details.",
         )
 
-    def _export_draft(self):
-        """Write a DRAFT-stamped worksheet from the current in-memory design."""
-        if not self.session:
+    # ------------------------------------------------------------------ #
+    # Generation — in-editor, repeatable, revision-numbered                 #
+    # ------------------------------------------------------------------ #
+    #
+    # Generation is a background action, not a mode: the editor stays up,
+    # both buttons disable while a run is in flight, and each run writes the
+    # next {slug}_dmp_revN.xlsx / {slug}_door_chart_revN.xlsx so the tech can
+    # print, review with the superintendent, edit, and regenerate at will.
+
+    def _school_slug(self) -> str:
+        return _slugify(self.session.design.site_info.school_name or "output")
+
+    def _latest_worksheet_path(self) -> Path | None:
+        """The worksheet a door chart would be built from: the last one this
+        session touched (a generated rev, or the imported source xlsx), else
+        the highest rev on disk from a previous session."""
+        if self.dmp_path is not None and Path(self.dmp_path).exists():
+            return Path(self.dmp_path)
+        if self.session is not None:
+            return latest_rev_path(self.output_dir, f"{self._school_slug()}_dmp")
+        return None
+
+    def _set_generating(self, which: str | None):
+        self._generating = which
+        if self.editor is not None:
+            self.editor.set_generating(which)
+
+    def _generate_worksheet(self):
+        """Generate the next worksheet revision without leaving the editor.
+
+        Validation warns but never blocks — the printed sheet is itself a
+        review pass with the superintendent."""
+        if self.state != "editing" or not self.session or not self.editor \
+                or self._generating is not None:
             return
-        if self.editor and self.editor.dirty and messagebox.askyesno(
-            "Save project?", "Save the project before exporting the draft?",
-        ):
-            self.editor.save()
-
-        design = self.session.design
-        sync_master_zones(design)
-        out_dir = self.output_dir
-        school_slug = _slugify(design.site_info.school_name or "output")
-
-        def work():
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / dmp_filename(school_slug, stamp="DRAFT")
-            with contextlib.redirect_stdout(self._redirector), \
-                 contextlib.redirect_stderr(self._redirector):
-                write_dmp_xlsx(design, DEFAULT_TEMPLATE, out_path, stamp="DRAFT")
-            return out_path
-
-        def on_done(out_path):
-            if messagebox.askyesno(
-                "Draft exported",
-                f"Draft written to:\n{out_path.name}\n\nOpen it now?",
-            ):
-                open_file(out_path)
-
-        def on_error(exc):
-            messagebox.showerror("Draft export failed", str(exc))
-
-        self._run_async(work, on_done, on_error)
-
-    def _finalize_from_editor(self):
-        """Editor's Finalize button → the existing generation flow (which still
-        escalates conflicts/topology via the modal dialogs)."""
-        if not self.session:
-            return
-        if self.editor and self.editor.dirty and messagebox.askyesno(
+        if self.editor.dirty and messagebox.askyesno(
             "Save project?", "Save the project before generating?",
         ):
             self.editor.save()
-        sync_master_zones(self.session.design)
-        self._set_toolbar_enabled(False)
-        self._start_generating_dmp()
 
-    def _back_to_editor(self):
-        """Return to the editor after a failed/aborted generation."""
-        self.state = "editing"
-        self.action_section.grid_remove()
-        if self.editor:
-            self._show_editor_surface()
-            self._set_toolbar_enabled(True)
-        elif self.session:
-            self._enter_editor(self.session)
+        def proceed():
+            design = self.session.design
+            sync_master_zones(design)
+            # Persist the per-machine site defaults (phone, tech, IP, ...).
+            save_prefs({**load_prefs(),
+                        "phone": design.site_info.phone or "",
+                        "install_tech": design.site_info.install_tech or "",
+                        "install_date": design.site_info.install_date or "",
+                        "ip_address": design.site_info.ip_address or "",
+                        "default_gateway": design.site_info.default_gateway or ""})
 
-    def _charts_from_worksheet(self):
-        """Quick path for imported worksheets: door charts from the file as-is,
-        ignoring any unsaved editor changes (the file on disk is the input)."""
-        if self.editor and not self.editor.maybe_close():
+            out_dir = self.output_dir
+            pdf_path = self.pdf_path
+            slug = self._school_slug()
+            self._set_generating("worksheet")
+
+            def work():
+                # PDF prep only applies when the source was a PDF; imported
+                # worksheets and saved sessions write straight from the design.
+                if pdf_path is not None:
+                    ensure_searchable_pdf(pdf_path)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_path = next_rev_path(out_dir, f"{slug}_dmp")
+                with contextlib.redirect_stdout(self._redirector), \
+                     contextlib.redirect_stderr(self._redirector):
+                    write_dmp_xlsx(design, DEFAULT_TEMPLATE, out_path)
+                return out_path
+
+            def on_done(out_path):
+                self._set_generating(None)
+                self.dmp_path = out_path
+                if self.editor is not None:
+                    self._ws_epoch = self.editor.edit_epoch
+                rev = out_path.stem.rsplit("_rev", 1)[-1]
+                self._show_toast(f"Worksheet rev {rev} ready",
+                                 action=("Open", lambda: open_file(out_path)))
+
+            def on_error(exc):
+                self._set_generating(None)
+                messagebox.showerror("Worksheet generation failed", str(exc))
+
+            self._run_async(work, on_done, on_error)
+
+        self.editor.show_issues_dialog(proceed, proceed_label="Generate anyway")
+
+    def _generate_door_chart(self):
+        """Generate the next door-chart revision from the newest worksheet."""
+        if self.state != "editing" or not self.session or not self.editor \
+                or self._generating is not None:
             return
-        self._set_toolbar_enabled(False)
-        self._start_generating_chart()
-
-    # ------------------------------------------------------------------ #
-    # Flow: generate DMP                                                    #
-    # ------------------------------------------------------------------ #
-
-    def _start_generating_dmp(self):
-        # Conflicts and topology review now live in the editor (SPLITTERS tab)
-        # and are enforced by the finalize gate rather than modal escalations.
-
-        # Job details now live on the design itself (written through by the
-        # editor's SITE tab). Persist the per-machine ones as defaults.
-        design = self.parsed_design
-        save_prefs({**load_prefs(),
-                    "phone": design.site_info.phone or "",
-                    "install_tech": design.site_info.install_tech or "",
-                    "install_date": design.site_info.install_date or "",
-                    "ip_address": design.site_info.ip_address or "",
-                    "default_gateway": design.site_info.default_gateway or ""})
-
-        self.state = "generating_dmp"
-        self._anim_done = False
-        self._pipe_done = False
-        self._pipe_result = None
-        self._pipe_error = None
-
-        n_rsps      = len(design.rsps)
-        n_kps       = len(getattr(design, "keypads", []))
-        n_zones     = len(getattr(design, "zones", None) or design.master_zones)
-        n_splitters = len(design.splitters)
-
-        steps = [
-            "Searchable PDF ready",
-            f"Zone schedule parsed ({n_rsps} RSPs, {n_kps} keypads, {n_zones} zones)",
-            f"Topology extracted ({n_splitters} splitters)",
-            "DMP worksheet written",
-        ]
-        self._show_action_generating_dmp(steps)
-
-        pdf_path = self.pdf_path
-        out_dir = self.output_dir
-
-        def work():
-            # PDF prep only applies when the source was a PDF. An imported worksheet
-            # (source_kind == "xlsx") has no pdf_path — the FINAL worksheet is written
-            # straight from the in-memory design, so skip the OCR/searchable step.
-            if pdf_path is not None:
-                ensure_searchable_pdf(pdf_path)
-            school_slug = _slugify(design.site_info.school_name or "output")
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_name = dmp_filename(school_slug, stamp="FINAL")
-            dmp_output = out_dir / out_name
-            with contextlib.redirect_stdout(self._redirector), \
-                 contextlib.redirect_stderr(self._redirector):
-                write_dmp_xlsx(design, DEFAULT_TEMPLATE, dmp_output, stamp="FINAL")
-            return dmp_output
-
-        def on_done(result):
-            if self.state != "generating_dmp":
-                return
-            self._pipe_result = result
-            self._pipe_done = True
-            self._check_dmp_gate()
-
-        def on_error(exc):
-            if self.state != "generating_dmp":
-                return
-            self._pipe_error = exc
-            self._show_action_error("DMP generation failed", exc, self._back_to_editor)
-
-        self._run_async(work, on_done, on_error)
-
-    def _on_dmp_anim_done(self):
-        if self.state != "generating_dmp":
+        src = self._latest_worksheet_path()
+        if src is None:
+            messagebox.showinfo(
+                "No worksheet yet",
+                "Generate a worksheet first — the door chart is built from it.")
             return
-        self._anim_done = True
-        self._check_dmp_gate()
-
-    def _check_dmp_gate(self):
-        if self._anim_done and self._pipe_done and self._pipe_error is None:
-            self.dmp_path = self._pipe_result
-            self.state = "review_dmp"
-            self._show_action_review_dmp()
-
-    # ------------------------------------------------------------------ #
-    # Flow: generate chart                                                  #
-    # ------------------------------------------------------------------ #
-
-    def _start_generating_chart(self):
-        self.state = "generating_chart"
-        self._anim_done = False
-        self._pipe_done = False
-        self._pipe_result = None
-        self._pipe_error = None
-
-        steps = [
-            "Read DMP worksheet",
-            "Populated Header (school + address)",
-            "Populated Master sheet (RSP locations, splitter topology)",
-            "Door chart written",
-        ]
-        self._show_action_generating_chart(steps)
-
-        dmp_path = self.dmp_path
+        # The chart reads the worksheet FILE, so editor changes newer than
+        # that file won't be in it. Warn (never block) when that's the case.
+        stale = (self._ws_epoch != self.editor.edit_epoch
+                 if self._ws_epoch is not None else self.editor.edit_epoch > 0)
+        if stale and not messagebox.askyesno(
+            "Worksheet may be stale",
+            f"The design has changed since {src.name} was generated.\n\n"
+            "The door chart is built from that file, so it won't include the "
+            "newer edits. Generate the door chart anyway?\n\n"
+            "(Tip: regenerate the worksheet first to pick up your edits.)",
+        ):
+            return
 
         out_dir = self.output_dir
+        self._set_generating("chart")
 
         def work():
             with contextlib.redirect_stdout(self._redirector), \
                  contextlib.redirect_stderr(self._redirector):
-                dmp_design = parse_dmp_worksheet(dmp_path)
+                dmp_design = parse_dmp_worksheet(src)
             school_slug = _slugify(dmp_design.site_info.school_name or "output")
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_name = f"{school_slug}_door_chart_{date.today().isoformat()}.xlsx"
-            chart_output = out_dir / out_name
+            chart_output = next_rev_path(out_dir, f"{school_slug}_door_chart")
             with contextlib.redirect_stdout(self._redirector), \
                  contextlib.redirect_stderr(self._redirector):
                 inject(DOOR_CHART_TEMPLATE, dmp_design, chart_output)
             return chart_output
 
-        def on_done(result):
-            if self.state != "generating_chart":
-                return
-            self._pipe_result = result
-            self._pipe_done = True
-            self._check_chart_gate()
+        def on_done(chart_path):
+            self._set_generating(None)
+            self.door_chart_path = chart_path
+            rev = chart_path.stem.rsplit("_rev", 1)[-1]
+            self._show_toast(f"Door chart rev {rev} ready",
+                             action=("Open", lambda: open_file(chart_path)))
 
         def on_error(exc):
-            if self.state != "generating_chart":
-                return
-            self._pipe_error = exc
-            self.state = "review_dmp"
-            self._show_action_error("Door chart generation failed", exc, self._retry_chart)
+            self._set_generating(None)
+            messagebox.showerror("Door chart generation failed", str(exc))
 
         self._run_async(work, on_done, on_error)
-
-    def _retry_chart(self):
-        self.state = "review_dmp"
-        self._show_action_review_dmp()
-
-    def _on_chart_anim_done(self):
-        if self.state != "generating_chart":
-            return
-        self._anim_done = True
-        self._check_chart_gate()
-
-    def _check_chart_gate(self):
-        if self._anim_done and self._pipe_done and self._pipe_error is None:
-            self.door_chart_path = self._pipe_result
-            self.state = "done"
-            self._show_action_done()
 
     # ------------------------------------------------------------------ #
     # Reset                                                                 #
     # ------------------------------------------------------------------ #
 
     def _process_another(self):
+        if self._generating is not None:
+            messagebox.showinfo("Generation in progress",
+                                "Wait for the current generation to finish "
+                                "before closing the project.")
+            return
         if self.editor and not self.editor.maybe_close():
             return
         self.pdf_path = None
@@ -1518,6 +1270,7 @@ class App:
         self.parsed_design = None
         self.session = None
         self.state = "idle"
+        self._ws_epoch = None
         self._stop_spinners()
         self._teardown_editor()
         self.action_section.grid_remove()
@@ -1676,8 +1429,8 @@ class App:
             (f"{mod}+N", "New / close project"),
             (f"{mod}+O", "Open a PDF or worksheet"),
             (f"{mod}+S", "Save the project (.dmps)"),
-            (f"{mod}+E", "Export a DRAFT worksheet"),
-            (f"{mod}+Shift+F", "Finalize (validation gate, then generate)"),
+            (f"{mod}+E", "Generate the DMP worksheet (next revision)"),
+            (f"{mod}+D", "Generate the door chart (next revision)"),
             ("Double-click / Return / F2", "Edit the selected zone cell"),
             ("Escape", "Cancel a zone edit"),
         ]
@@ -1733,7 +1486,7 @@ class App:
         self.root.destroy()
 
     def _on_close(self):
-        if self.state in ("generating_dmp", "generating_chart"):
+        if self._generating is not None:
             if messagebox.askyesno("Quit?", "Generation in progress — quit anyway?"):
                 self.root.destroy()
             return

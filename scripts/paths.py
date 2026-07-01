@@ -1,8 +1,41 @@
 import json
+import re
 import sys
 from pathlib import Path
 
 APP_NAME = "DMP WS & Door Chart Generator"
+
+# Generated artifacts are revision-numbered ({base}_rev3.xlsx): each generate
+# keeps prior revisions so a superintendent's mark-ups on rev N stay
+# comparable against rev N+1.
+_REV_RE_TMPL = r"^{base}_rev(\d+)\.xlsx$"
+
+
+def _rev_numbers(out_dir: Path, base: str) -> list[int]:
+    rev_re = re.compile(_REV_RE_TMPL.format(base=re.escape(base)))
+    numbers = []
+    try:
+        for p in out_dir.iterdir():
+            m = rev_re.match(p.name)
+            if m:
+                numbers.append(int(m.group(1)))
+    except OSError:
+        pass
+    return numbers
+
+
+def next_rev_path(out_dir: Path, base: str) -> Path:
+    """The next free revision filename for an artifact ({base}_rev{N}.xlsx)."""
+    numbers = _rev_numbers(out_dir, base)
+    return out_dir / f"{base}_rev{max(numbers, default=0) + 1}.xlsx"
+
+
+def latest_rev_path(out_dir: Path, base: str) -> Path | None:
+    """The highest existing revision of an artifact, or None if none exist."""
+    numbers = _rev_numbers(out_dir, base)
+    if not numbers:
+        return None
+    return out_dir / f"{base}_rev{max(numbers)}.xlsx"
 
 # App preferences file (also written by app.py). The "output_dir" key, if set,
 # overrides the default output location.

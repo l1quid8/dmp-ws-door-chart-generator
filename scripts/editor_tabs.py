@@ -322,9 +322,9 @@ class SplittersTab(ctk.CTkFrame):
         reviewed_cb.grid(row=1, column=0, sticky="w", pady=(6, 0))
         attach_tooltip(
             reviewed_cb,
-            "Confirms the splitter wiring matches the riser diagram. Required "
-            "before a FINAL worksheet. Adding or removing hardware re-opens this "
-            "for review.")
+            "Confirms the splitter wiring matches the riser diagram. Until it's "
+            "checked, generating a worksheet shows a warning. Adding or removing "
+            "hardware re-opens this for review.")
         return frame
 
     def _add_clicked(self):
