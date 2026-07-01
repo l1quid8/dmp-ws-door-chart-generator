@@ -14,6 +14,7 @@ from tkinter import ttk
 import customtkinter as ctk
 
 from parse_dmp_worksheet import DMPDesign, ZoneInfo
+from ui_widgets import attach_tooltip
 
 ACCENT = "#4a7bb8"
 ERROR_BG = "#fde8e8"
@@ -73,6 +74,13 @@ class ZonesTab(ctk.CTkFrame):
         )
         self._filter_seg.set("All")
         self._filter_seg.grid(row=0, column=1)
+        attach_tooltip(
+            self._filter_seg,
+            "Filter the zone list:\n"
+            "• All — every zone\n"
+            "• Needs attention — blank or “NEW” descriptions to fill in\n"
+            "• Spares — unused points marked SPARE\n"
+            "• Errors — zones that fail a finalize check")
 
         if self.on_add_expander:
             ctk.CTkButton(

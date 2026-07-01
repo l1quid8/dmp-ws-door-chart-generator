@@ -34,6 +34,9 @@ from hardware import (  # noqa: E402
     add_keypad,
     add_splitter,
     block_orphans,
+    diff_refs,
+    existing_locations,
+    snapshot_refs,
     next_expander_number,
     remove_expander,
     remove_keypad,
@@ -282,6 +285,61 @@ def test_add_expander_materializes_zones_from_master():
     descs = {z.number: z.description for z in d.master_zones}
     assert descs[501] == "FACP ROOM" and descs[502] == "LIBRARY"   # preserved
     assert descs[523] == "PS-2: A/C LOSS"                          # new expander
+
+
+# -------- existing_locations (autocomplete source) --------
+
+def test_existing_locations_dedupes_case_insensitively():
+    d = DMPDesign(
+        rsps=[RSP(number=1, location="FACP ROOM")],
+        power_supplies=[PowerSupply(number=1, location="facp room")],  # paired RSP/PS
+        splitters=[Splitter(id="710-LX500-1", splitter_type="LX", location="BLDG A IDF")],
+        keypads=[Keypad(number=1, source="MSP", location="MAIN ENTRY"),
+                 Keypad(number=2, source="MSP", location=None)],       # blank skipped
+    )
+    locs = existing_locations(d)
+    assert locs == ["BLDG A IDF", "FACP ROOM", "MAIN ENTRY"]  # sorted, one FACP
+
+
+def test_existing_locations_empty_design():
+    assert existing_locations(DMPDesign()) == []
+
+
+# -------- cascade reporting (snapshot_refs / diff_refs) --------
+
+def test_diff_refs_flags_scrubbed_outputs_on_expander_removal():
+    d = _design_with_expanders(2)
+    d.splitters.append(Splitter(id="710-LX500-1", splitter_type="LX",
+                                outputs=["RSP-1", "RSP-2", "Spare"]))
+    before = snapshot_refs(d)
+    remove_expander(d, 2)
+    changes = diff_refs(before, snapshot_refs(d))
+    assert len(changes) == 1
+    assert changes[0].tab == "SPLITTERS"
+    assert "710-LX500-1 output 2" in changes[0].message and "RSP-2" in changes[0].message
+
+
+def test_diff_refs_flags_blanked_keypad_source_not_removed_splitter():
+    d = DMPDesign()
+    s1 = add_splitter(d, "LX")
+    s2 = add_splitter(d, "LX")
+    s1.outputs = ["To 710-LX500-2", "RSP-1", "Spare"]
+    d.keypads.append(Keypad(number=2, source="710-LX500-2", location="HALL"))
+    before = snapshot_refs(d)
+    remove_splitter(d, "710-LX500-2")
+    changes = diff_refs(before, snapshot_refs(d))
+    tabs = sorted(c.tab for c in changes)
+    # s1's "To …" output → Spare (SPLITTERS) and the keypad source → blank (KEYPADS);
+    # the removed splitter itself is not reported.
+    assert tabs == ["KEYPADS", "SPLITTERS"]
+    assert any("Keypad #2" in c.message for c in changes)
+
+
+def test_diff_refs_empty_when_nothing_dangles():
+    d = _design_with_expanders(1)
+    before = snapshot_refs(d)
+    add_expander(d, "714-16")          # adds never dangle
+    assert diff_refs(before, snapshot_refs(d)) == []
 
 
 # -------- round-trips --------

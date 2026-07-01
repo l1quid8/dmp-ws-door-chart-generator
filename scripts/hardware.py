@@ -20,6 +20,7 @@ Conventions encoded here:
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from parse_dmp_worksheet import DMPDesign, Keypad, PowerSupply, RSP, Splitter, ZoneInfo
 
@@ -250,6 +251,73 @@ def remove_keypad(design: DMPDesign, number: int) -> None:
 
 
 # -------- shared --------
+
+def existing_locations(design: DMPDesign) -> list[str]:
+    """Distinct location strings already used anywhere in the design.
+
+    Feeds the add-hardware dialogs' autocomplete so a tech reuses a room they
+    already named instead of retyping it (a typo would split one room into two
+    location strings). RSP and its paired power supply share a room, so the
+    case-insensitive de-dupe collapses them to one suggestion.
+    """
+    seen: dict[str, str] = {}
+    for obj in (*design.rsps, *design.power_supplies,
+                *design.splitters, *design.keypads):
+        loc = (getattr(obj, "location", None) or "").strip()
+        if loc:
+            seen.setdefault(loc.lower(), loc)   # keep first-seen casing
+    return sorted(seen.values(), key=str.lower)
+
+
+@dataclass
+class CascadeChange:
+    """A wiring reference auto-downgraded by a hardware removal, for the editor
+    to surface so the tech reviews it instead of discovering it at finalize."""
+    tab: str        # "SPLITTERS" | "KEYPADS" — which editor tab to route to
+    message: str    # human description of what changed
+
+
+def snapshot_refs(design: DMPDesign) -> dict:
+    """Capture the wiring references a removal might silently rewrite.
+
+    Pair with diff_refs() around a remove_* call: the scrubbers flip dependent
+    splitter outputs to 'Spare' and blank keypad sources in place, destroying
+    the evidence, so we snapshot before and compare after.
+    """
+    return {
+        "outputs": {s.id: list(s.outputs or []) for s in design.splitters},
+        "sources": {k.number: k.source for k in design.keypads},
+    }
+
+
+def diff_refs(before: dict, after: dict) -> list[CascadeChange]:
+    """References that a removal downgraded, as routable CascadeChange items.
+
+    Only reports surviving hardware whose wiring changed — a splitter/keypad
+    that was itself removed (absent from `after`) is the intended deletion, not
+    collateral, so it's skipped.
+    """
+    changes: list[CascadeChange] = []
+    after_outputs = after["outputs"]
+    for sid, outs in before["outputs"].items():
+        new_outs = after_outputs.get(sid)
+        if new_outs is None:
+            continue                      # this splitter was the one removed
+        for i, (old, new) in enumerate(zip(outs, new_outs)):
+            if old != new and (new or "").strip() == "Spare":
+                changes.append(CascadeChange(
+                    "SPLITTERS", f"{sid} output {i + 1} is now Spare (was {old})"))
+    sentinel = object()
+    after_sources = after["sources"]
+    for num, src in before["sources"].items():
+        new_src = after_sources.get(num, sentinel)
+        if new_src is sentinel:
+            continue                      # this keypad was the one removed
+        if src and not new_src:
+            changes.append(CascadeChange(
+                "KEYPADS", f"Keypad #{num} lost its source (was {src})"))
+    return changes
+
 
 def _scrub_splitter_outputs(design: DMPDesign, token: str) -> None:
     """Replace outputs that pointed at removed hardware with 'Spare'."""
