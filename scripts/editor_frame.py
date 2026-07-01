@@ -44,17 +44,20 @@ class EditorFrame(ctk.CTkFrame):
     this frame calls back into them via the callbacks passed at construction."""
 
     def __init__(self, master, root, session: Session, *,
-                 on_finalize, on_status_change=None, on_validation_change=None,
-                 on_generate_charts=None):
+                 on_generate_worksheet=None, on_generate_chart=None,
+                 on_status_change=None, on_validation_change=None):
         super().__init__(master, fg_color="transparent")
         self.root = root
         self.session = session
         self.dirty = False
+        # Bumped on every edit; the app snapshots it after a worksheet generate
+        # to warn when a door chart would be built from a stale worksheet.
+        self.edit_epoch = 0
         self._recovery_job: str | None = None
-        self._on_finalize = on_finalize
+        self._on_generate_worksheet = on_generate_worksheet or (lambda: None)
+        self._on_generate_chart = on_generate_chart or (lambda: None)
         self.on_status_change = on_status_change or (lambda text, dirty: None)
         self.on_validation_change = on_validation_change or (lambda text, ok: None)
-        self._on_generate_charts = on_generate_charts
         self._site_vars: dict[str, ctk.StringVar] = {}
         self._suspend_traces = False
 
@@ -75,6 +78,7 @@ class EditorFrame(ctk.CTkFrame):
 
     def mark_dirty(self, write_recovery_now: bool = False):
         self.dirty = True
+        self.edit_epoch += 1
         self._notify_status()
         if self._recovery_job is not None:
             with contextlib.suppress(Exception):
@@ -180,9 +184,9 @@ class EditorFrame(ctk.CTkFrame):
             widget.grid(row=0, column=0, sticky="nsew")
             setattr(self, attr, widget)
 
-        # Bottom bar: an always-visible Save control (saving was keyboard/menu
-        # only, easy to miss) reflecting the dirty state, plus the optional
-        # generate-charts shortcut.
+        # Bottom bar: Save (reflecting dirty state) plus the two generate
+        # actions. Generation runs in the background and never replaces the
+        # editor — outputs are revision-numbered artifacts you refresh at will.
         bottom = ctk.CTkFrame(self, fg_color="transparent")
         bottom.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         bottom.columnconfigure(1, weight=1)
@@ -193,14 +197,35 @@ class EditorFrame(ctk.CTkFrame):
             command=self.save)
         self._save_btn.grid(row=0, column=0, sticky="w")
 
-        if self._on_generate_charts and self.session.source_kind == "xlsx":
-            ctk.CTkButton(
-                bottom, text="Generate door charts from this worksheet (as-is)",
-                height=28, fg_color="transparent", text_color=ACCENT,
-                hover_color=("gray90", "gray25"),
-                command=self._on_generate_charts,
-            ).grid(row=0, column=2, sticky="e")
+        gen_row = ctk.CTkFrame(bottom, fg_color="transparent")
+        gen_row.grid(row=0, column=2, sticky="e")
+        self._gen_ws_btn = ctk.CTkButton(
+            gen_row, text="Generate Worksheet", height=30, width=160,
+            fg_color="transparent", border_width=1, border_color=ACCENT,
+            text_color=ACCENT, hover_color=("gray90", "gray25"),
+            command=self._on_generate_worksheet)
+        self._gen_ws_btn.pack(side="left", padx=(0, 8))
+        self._gen_chart_btn = ctk.CTkButton(
+            gen_row, text="Generate Door Chart", height=30, width=160,
+            fg_color="transparent", border_width=1, border_color=ACCENT,
+            text_color=ACCENT, hover_color=("gray90", "gray25"),
+            command=self._on_generate_chart)
+        self._gen_chart_btn.pack(side="left")
         self._update_save_button()
+
+    def set_generating(self, which: str | None):
+        """Reflect a running generation on the buttons: `which` is
+        'worksheet', 'chart', or None when idle. Both disable while one runs
+        (they share the design and the output pipeline)."""
+        ws_running = which == "worksheet"
+        chart_running = which == "chart"
+        running = which is not None
+        self._gen_ws_btn.configure(
+            text="Generating…" if ws_running else "Generate Worksheet",
+            state="disabled" if running else "normal")
+        self._gen_chart_btn.configure(
+            text="Generating…" if chart_running else "Generate Door Chart",
+            state="disabled" if running else "normal")
 
     def _on_zones_edit(self):
         sync_master_zones(self.session.design)
@@ -252,7 +277,7 @@ class EditorFrame(ctk.CTkFrame):
         n = len(changes)
         ctk.CTkLabel(
             win,
-            text=f"{n} connection{'s' if n != 1 else ''} changed — review before finalizing",
+            text=f"{n} connection{'s' if n != 1 else ''} changed — review before generating",
             font=ctk.CTkFont(size=14, weight="bold"), text_color="#c05621",
         ).pack(anchor="w", padx=20, pady=(18, 2))
         ctk.CTkLabel(
@@ -298,7 +323,7 @@ class EditorFrame(ctk.CTkFrame):
         self.power_tab.refresh()
 
     # ------------------------------------------------------------------ #
-    # Finalize gate                                                         #
+    # Pre-generate issue summary (warn, never block)                        #
     # ------------------------------------------------------------------ #
 
     def goto_issue(self, issue):
@@ -310,26 +335,32 @@ class EditorFrame(ctk.CTkFrame):
             with contextlib.suppress(ValueError):
                 self.zones.select_zone(int(ref.split(":", 1)[1]))
 
-    def show_finalize_dialog(self):
+    def show_issues_dialog(self, on_proceed, *, proceed_label: str,
+                           note: str | None = None):
+        """Run `on_proceed` immediately when the design is clean; otherwise
+        summarize the open issues and let the tech choose "generate anyway"
+        or jump to a problem. Generation is never blocked — the printed sheet
+        is itself a review pass with the superintendent."""
         issues = self.refresh_validation()
-        errors = [i for i in issues if i.severity == "error"]
-        warnings = [i for i in issues if i.severity == "warning"]
-        design = self.session.design
+        if not issues and not note:
+            on_proceed()
+            return
 
         win = ctk.CTkToplevel(self.root)
-        win.title("Finalize worksheet")
+        win.title("Review before generating")
         win.geometry("620x520")
         win.transient(self.root)
         win.grab_set()
 
-        if errors:
-            head = f"{len(errors)} issue{'s' if len(errors) != 1 else ''} to resolve before FINAL"
-            color = "#c05621"
-        else:
-            head = "All checks passed — ready to generate the FINAL worksheet"
-            color = "#2f855a"
+        n = len(issues)
+        head = (f"{n} open issue{'s' if n != 1 else ''} — generate anyway, "
+                "or review first" if issues else "Heads up before generating")
         ctk.CTkLabel(win, text=head, font=ctk.CTkFont(size=14, weight="bold"),
-                     text_color=color).pack(anchor="w", padx=20, pady=(18, 8))
+                     text_color="#c05621").pack(anchor="w", padx=20, pady=(18, 8))
+        if note:
+            ctk.CTkLabel(win, text=f"⚠  {note}", wraplength=560, justify="left",
+                         font=ctk.CTkFont(size=12), text_color="#c05621",
+                         ).pack(anchor="w", padx=20, pady=(0, 6))
 
         body = ctk.CTkScrollableFrame(win, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=12, pady=4)
@@ -338,7 +369,7 @@ class EditorFrame(ctk.CTkFrame):
 
         row = 0
         by_tab: dict[str, list] = {}
-        for issue in errors + warnings:
+        for issue in issues:
             by_tab.setdefault(issue.tab, []).append(issue)
         for tab_name in TAB_TITLES:
             tab_issues = by_tab.get(tab_name)
@@ -374,18 +405,6 @@ class EditorFrame(ctk.CTkFrame):
                               ).grid(row=0, column=2, padx=(6, 0), pady=1)
                 row += 1
 
-        if not errors:
-            n_zones = len(design.zones)
-            n_spares = sum(1 for z in design.zones
-                           if (z.location or "").strip().upper() == "SPARE")
-            summary = (f"{design.site_info.school_name or 'Unknown school'}\n"
-                       f"{n_zones} zones ({n_spares} spare) · "
-                       f"{len(design.rsps)} RSPs · {len(design.keypads)} keypads · "
-                       f"{len(design.splitters)} splitters")
-            ctk.CTkLabel(body, text=summary, font=ctk.CTkFont(size=12),
-                         justify="left", anchor="w",
-                         ).grid(row=row, column=0, sticky="w", padx=8, pady=12)
-
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(fill="x", padx=20, pady=(6, 18))
         btn_row.columnconfigure(0, weight=1)
@@ -395,23 +414,21 @@ class EditorFrame(ctk.CTkFrame):
             win.grab_release()
             win.destroy()
 
-        ctk.CTkButton(btn_row, text="Back to editing", height=40,
+        ctk.CTkButton(btn_row, text="Review first", height=40,
                       fg_color="transparent", border_width=2, border_color="gray60",
                       text_color=("gray30", "gray80"),
                       hover_color=("gray90", "gray25"), command=close,
                       ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
-        def generate():
+        def proceed():
             win.grab_release()
             win.destroy()
-            self._on_finalize()
+            on_proceed()
 
-        gen_btn = ctk.CTkButton(btn_row, text="Generate FINAL worksheet", height=40,
-                                fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                                font=ctk.CTkFont(weight="bold"), command=generate)
-        gen_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
-        if errors:
-            gen_btn.configure(state="disabled")
+        ctk.CTkButton(btn_row, text=proceed_label, height=40,
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                      font=ctk.CTkFont(weight="bold"), command=proceed,
+                      ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
     # ------------------------------------------------------------------ #
     # Validation                                                            #
@@ -424,7 +441,7 @@ class EditorFrame(ctk.CTkFrame):
         if counts:
             text = "   ".join(f"{tab} ⚠{n}" for tab, n in counts.items())
         else:
-            text = "✓ ready to finalize"
+            text = "✓ no issues"
         self.on_validation_change(text, not counts)
         if hasattr(self, "zones"):
             error_zones = set()
