@@ -52,6 +52,43 @@ ACCENT = "#4a7bb8"
 ACCENT_HOVER = "#3a6aa8"
 SPINNER_FRAMES = list("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
+_WORKFLOW_HELP = """The editor is the working document. The Excel files are artifacts \
+generated from it — they are never re-imported, so always re-open the .dmps project to \
+make changes.
+
+1. IMPORT
+   Drop a design PDF, an existing DMP worksheet (.xlsx), or a saved project (.dmps) onto \
+the home screen. The app parses it and detects the school name.
+
+2. EDIT  (five tabs)
+   • SITE — school, address, contact, tech, install date, IP / gateway, XR-550 location.
+   • ZONES — searchable grid of every zone. Filter chips: All / Needs attention (blank or \
+"NEW" description) / Spares / Errors. Double-click a cell to edit.
+   • SPLITTERS — splitter wiring and CAD conflicts. Tick "Wiring reviewed" once you've \
+checked it against the riser diagram (required before FINAL).
+   • KEYPADS — each keypad's location and source (MSP or a KP splitter).
+   • POWER — RSP / power-supply locations; add or remove expanders here.
+
+   Naming rules the finalize gate enforces: SPARE must be uppercase, and RSP references \
+must be hyphenated (RSP-3, not RSP 3).
+
+3. SAVE
+   Saving is explicit — click Save (or Ctrl/Cmd+S). The orange dot and "Unsaved changes" \
+mean you have edits that aren't on disk yet. A background recovery file guards against \
+crashes between saves.
+
+4. EXPORT DRAFT  (anytime)
+   Produces a worksheet stamped DRAFT / NOT FOR INSTALL. Drafts can't be re-imported.
+
+5. FINALIZE
+   Runs a validation gate. Errors block; warnings allow. When it passes it generates the \
+FINAL worksheet, and from that the door chart.
+
+Hardware changes (post-CAD): you can add or remove expanders, splitters, and keypads. \
+Removing hardware re-points anything that fed it to "Spare" and unsources affected \
+keypads — the app pops a summary and routes you to review the new wiring. Template \
+capacities: 15 expanders, 12 LX + 12 KP splitters, 28 keypads."""
+
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
 
@@ -292,13 +329,20 @@ class App:
                             command=self._finalize_clicked)
         self._menubar.add_cascade(label="Worksheet", menu=ws_menu)
 
-        # ---- Help (non-macOS: no application menu, so updates live here) ----
+        # ---- Help (always present — lowers the README-dependence) ----
+        help_menu = tk.Menu(self._menubar, tearoff=0)
+        help_menu.add_command(label="Field-Edit Workflow…",
+                              command=self._show_workflow_help)
+        help_menu.add_command(label="Keyboard Shortcuts…",
+                              command=self._show_shortcuts_help)
+        help_menu.add_command(label="Open README", command=self._open_readme)
+        # On macOS "Check for Updates…" already lives in the app menu above.
         if not is_mac:
-            help_menu = tk.Menu(self._menubar, tearoff=0)
+            help_menu.add_separator()
             help_menu.add_command(
                 label="Check for Updates…",
                 command=lambda: self._check_for_updates(silent=False))
-            self._menubar.add_cascade(label="Help", menu=help_menu)
+        self._menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.configure(menu=self._menubar)
 
@@ -1601,6 +1645,52 @@ class App:
         if self._update_dialog is not None and self._update_dialog.winfo_exists():
             self._update_dialog.destroy()
         self._update_dialog = None
+
+    # ------------------------------------------------------------------ #
+    # In-app help                                                          #
+    # ------------------------------------------------------------------ #
+
+    def _show_help_text(self, title: str, body: str):
+        """Read-only help window — same shell as the update dialog."""
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title(title)
+        dlg.geometry("560x520")
+        dlg.transient(self.root)
+        ctk.CTkLabel(dlg, text=title,
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(
+            anchor="w", padx=20, pady=(18, 8))
+        box = ctk.CTkTextbox(dlg, wrap="word")
+        box.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        box.insert("1.0", body)
+        box.configure(state="disabled")
+        ctk.CTkButton(dlg, text="Close", width=90, fg_color=ACCENT,
+                      hover_color=ACCENT_HOVER,
+                      command=dlg.destroy).pack(pady=(0, 16))
+
+    def _show_workflow_help(self):
+        self._show_help_text("Field-Edit Workflow", _WORKFLOW_HELP)
+
+    def _show_shortcuts_help(self):
+        mod = "Cmd" if sys.platform == "darwin" else "Ctrl"
+        rows = [
+            (f"{mod}+N", "New / close project"),
+            (f"{mod}+O", "Open a PDF or worksheet"),
+            (f"{mod}+S", "Save the project (.dmps)"),
+            (f"{mod}+E", "Export a DRAFT worksheet"),
+            (f"{mod}+Shift+F", "Finalize (validation gate, then generate)"),
+            ("Double-click / Return / F2", "Edit the selected zone cell"),
+            ("Escape", "Cancel a zone edit"),
+        ]
+        body = "\n".join(f"{k:<28}{v}" for k, v in rows)
+        self._show_help_text("Keyboard Shortcuts", body)
+
+    def _open_readme(self):
+        """Open the bundled README if present, else the online copy."""
+        local = resource_path("README.md")
+        if local.exists():
+            webbrowser.open(local.as_uri())
+        else:
+            webbrowser.open(f"https://github.com/{updater.REPO}/blob/main/README.md")
 
     def _start_update(self, info, dlg, btns):
         """Download the new build with a progress bar, then swap + relaunch."""

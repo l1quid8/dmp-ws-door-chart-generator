@@ -24,12 +24,14 @@ from hardware import (
     add_expander,
     add_keypad,
     add_splitter,
+    existing_locations,
     remove_expander,
     remove_keypad,
     remove_splitter,
     renumber_splitter,
 )
 from session import Session
+from ui_widgets import AutocompleteEntry, attach_tooltip
 
 ACCENT = "#4a7bb8"
 ACCENT_HOVER = "#3a6aa8"
@@ -100,8 +102,9 @@ def prompt_add_expander(root, session: Session, on_done) -> None:
         ctk.CTkRadioButton(win, text=label, variable=model_var, value=model,
                            ).pack(anchor="w", padx=28, pady=3)
 
-    loc = ctk.CTkEntry(win, width=320, height=34,
-                       placeholder_text="Location (e.g. BLDG A 1ST FLR IDF)")
+    loc = AutocompleteEntry(win, lambda: existing_locations(session.design),
+                            width=320, height=34,
+                            placeholder_text="Location (e.g. BLDG A 1ST FLR IDF)")
     loc.pack(padx=20, pady=(10, 0))
 
     def confirm():
@@ -130,7 +133,8 @@ def prompt_add_splitter(root, session: Session, on_done) -> None:
         ctk.CTkRadioButton(win, text=label, variable=type_var, value=stype,
                            ).pack(anchor="w", padx=28, pady=3)
 
-    loc = ctk.CTkEntry(win, width=320, height=34, placeholder_text="Location")
+    loc = AutocompleteEntry(win, lambda: existing_locations(session.design),
+                            width=320, height=34, placeholder_text="Location")
     loc.pack(padx=20, pady=(10, 0))
 
     def confirm():
@@ -159,7 +163,8 @@ def prompt_add_keypad(root, session: Session, on_done) -> None:
                  font=ctk.CTkFont(size=13, weight="bold"),
                  ).pack(anchor="w", padx=20, pady=(16, 8))
 
-    loc = ctk.CTkEntry(win, width=320, height=34, placeholder_text="Location")
+    loc = AutocompleteEntry(win, lambda: existing_locations(session.design),
+                            width=320, height=34, placeholder_text="Location")
     loc.pack(padx=20, pady=(2, 8))
 
     source_menu = ctk.CTkOptionMenu(
@@ -208,11 +213,15 @@ def _remove_button(parent, command) -> ctk.CTkButton:
 
 class SplittersTab(ctk.CTkFrame):
     def __init__(self, master, session: Session, on_change,
-                 on_structure_change=None):
+                 on_structure_change=None, on_hardware_change=None):
         super().__init__(master, fg_color="transparent")
         self.session = session
         self.on_change = on_change
         self.on_structure_change = on_structure_change or on_change
+        # Removals route through here so the editor can report cascade fallout;
+        # falls back to a plain mutate + structure-refresh when unset.
+        self.on_hardware_change = on_hardware_change or (
+            lambda mutate: (mutate(), self.on_structure_change()))
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
@@ -304,12 +313,18 @@ class SplittersTab(ctk.CTkFrame):
             self.session.topology_confirmed = self._reviewed_var.get()
             self.on_change()
 
-        ctk.CTkCheckBox(
+        reviewed_cb = ctk.CTkCheckBox(
             frame, text="Wiring reviewed against the riser diagram",
             variable=self._reviewed_var, command=toggled,
             font=ctk.CTkFont(size=12, weight="bold"),
             checkmark_color="white", fg_color=ACCENT, hover_color=ACCENT_HOVER,
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        )
+        reviewed_cb.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        attach_tooltip(
+            reviewed_cb,
+            "Confirms the splitter wiring matches the riser diagram. Required "
+            "before a FINAL worksheet. Adding or removing hardware re-opens this "
+            "for review.")
         return frame
 
     def _add_clicked(self):
@@ -323,8 +338,8 @@ class SplittersTab(ctk.CTkFrame):
             "to it become Spare; keypads it fed will need a new source.",
         ):
             return
-        remove_splitter(self.session.design, splitter.id)
-        self.on_structure_change()
+        self.on_hardware_change(
+            lambda: remove_splitter(self.session.design, splitter.id))
 
     def _renumber_clicked(self, splitter, entry):
         if not entry.winfo_exists():
@@ -455,11 +470,15 @@ class SplittersTab(ctk.CTkFrame):
 
 class KeypadsTab(ctk.CTkFrame):
     def __init__(self, master, session: Session, on_change,
-                 on_structure_change=None):
+                 on_structure_change=None, on_hardware_change=None):
         super().__init__(master, fg_color="transparent")
         self.session = session
         self.on_change = on_change
         self.on_structure_change = on_structure_change or on_change
+        # Removals route through here so the editor can report cascade fallout;
+        # falls back to a plain mutate + structure-refresh when unset.
+        self.on_hardware_change = on_hardware_change or (
+            lambda mutate: (mutate(), self.on_structure_change()))
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
@@ -499,8 +518,8 @@ class KeypadsTab(ctk.CTkFrame):
             "become Spare.",
         ):
             return
-        remove_keypad(self.session.design, kp.number)
-        self.on_structure_change()
+        self.on_hardware_change(
+            lambda: remove_keypad(self.session.design, kp.number))
 
     def _build_keypad_card(self, kp) -> ctk.CTkFrame:
         card = ctk.CTkFrame(self.body, corner_radius=8, fg_color=("gray97", "gray20"))
@@ -572,11 +591,15 @@ class PowerTab(ctk.CTkFrame):
     apply_location_conflict)."""
 
     def __init__(self, master, session: Session, on_change,
-                 on_structure_change=None):
+                 on_structure_change=None, on_hardware_change=None):
         super().__init__(master, fg_color="transparent")
         self.session = session
         self.on_change = on_change
         self.on_structure_change = on_structure_change or on_change
+        # Removals route through here so the editor can report cascade fallout;
+        # falls back to a plain mutate + structure-refresh when unset.
+        self.on_hardware_change = on_hardware_change or (
+            lambda mutate: (mutate(), self.on_structure_change()))
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
@@ -631,8 +654,8 @@ class PowerTab(ctk.CTkFrame):
             "physical).",
         ):
             return
-        remove_expander(self.session.design, rsp.number)
-        self.on_structure_change()
+        self.on_hardware_change(
+            lambda: remove_expander(self.session.design, rsp.number))
 
     def _build_rsp_card(self, rsp, ps_by_number) -> ctk.CTkFrame:
         card = ctk.CTkFrame(self.body, corner_radius=8, fg_color=("gray97", "gray20"))

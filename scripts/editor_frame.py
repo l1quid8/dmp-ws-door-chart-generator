@@ -19,6 +19,7 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
+from hardware import snapshot_refs, diff_refs
 from session import Session, save_session, sync_master_zones, write_recovery, clear_recovery
 from validation import validate_design, badge_counts
 from editor_zones import ZonesTab
@@ -123,6 +124,7 @@ class EditorFrame(ctk.CTkFrame):
         return True
 
     def _notify_status(self):
+        self._update_save_button()
         if self.dirty:
             self.on_status_change("●  Unsaved changes", True)
             return
@@ -131,6 +133,19 @@ class EditorFrame(ctk.CTkFrame):
             with contextlib.suppress(Exception):
                 when = datetime.fromisoformat(self.session.saved_at).strftime("%-I:%M %p")
         self.on_status_change(f"Saved {when} ✓" if when else "Saved ✓", False)
+
+    def _update_save_button(self):
+        """Mirror the dirty state on the in-editor Save button: actionable when
+        there's unsaved work, a quiet 'Saved ✓' confirmation when there isn't."""
+        btn = getattr(self, "_save_btn", None)
+        if btn is None:
+            return
+        if self.dirty:
+            btn.configure(text="Save", state="normal",
+                          fg_color=ACCENT, hover_color=ACCENT_HOVER)
+        else:
+            btn.configure(text="Saved ✓", state="disabled",
+                          fg_color=("gray80", "gray30"))
 
     # ------------------------------------------------------------------ #
     # Tabs                                                                  #
@@ -160,17 +175,32 @@ class EditorFrame(ctk.CTkFrame):
                                  ("KEYPADS", KeypadsTab, "keypads_tab"),
                                  ("POWER", PowerTab, "power_tab")]:
             widget = cls(self.tabs.tab(title), self.session, self._on_design_edit,
-                         on_structure_change=self._on_structure_change)
+                         on_structure_change=self._on_structure_change,
+                         on_hardware_change=self.apply_hardware_change)
             widget.grid(row=0, column=0, sticky="nsew")
             setattr(self, attr, widget)
 
+        # Bottom bar: an always-visible Save control (saving was keyboard/menu
+        # only, easy to miss) reflecting the dirty state, plus the optional
+        # generate-charts shortcut.
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        bottom.columnconfigure(1, weight=1)
+
+        self._save_btn = ctk.CTkButton(
+            bottom, text="Save", height=30, width=120, fg_color=ACCENT,
+            hover_color=ACCENT_HOVER, font=ctk.CTkFont(weight="bold"),
+            command=self.save)
+        self._save_btn.grid(row=0, column=0, sticky="w")
+
         if self._on_generate_charts and self.session.source_kind == "xlsx":
             ctk.CTkButton(
-                self, text="Generate door charts from this worksheet (as-is)",
+                bottom, text="Generate door charts from this worksheet (as-is)",
                 height=28, fg_color="transparent", text_color=ACCENT,
                 hover_color=("gray90", "gray25"),
                 command=self._on_generate_charts,
-            ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+            ).grid(row=0, column=2, sticky="e")
+        self._update_save_button()
 
     def _on_zones_edit(self):
         sync_master_zones(self.session.design)
@@ -189,6 +219,73 @@ class EditorFrame(ctk.CTkFrame):
         self.mark_dirty()
         self.refresh_validation()
         self.refresh_all_tabs()
+
+    def apply_hardware_change(self, mutate):
+        """Run a removal that may cascade, then surface what it rewired.
+
+        remove_* heals dangling references in place (outputs → Spare, keypad
+        sources → blank). That's silent today, so a tech can ship wiring they
+        never reviewed. We snapshot around the mutation, and when it changed
+        anything we mark the topology unreviewed again and route the tech to
+        the affected cards — never auto-rewiring on their behalf.
+        """
+        before = snapshot_refs(self.session.design)
+        mutate()
+        changes = diff_refs(before, snapshot_refs(self.session.design))
+        if changes:
+            self.session.topology_confirmed = False
+        sync_master_zones(self.session.design)
+        self.mark_dirty()
+        self.refresh_validation()
+        self.refresh_all_tabs()  # rebuilds SPLITTERS header → re-reads reset flag
+        if changes:
+            self._report_structure_change(changes)
+
+    def _report_structure_change(self, changes):
+        """Modal summary of cascade fallout with per-tab 'Go to' routing."""
+        win = ctk.CTkToplevel(self.root)
+        win.title("Wiring updated")
+        win.geometry("560x360")
+        win.transient(self.root)
+        win.grab_set()
+
+        n = len(changes)
+        ctk.CTkLabel(
+            win,
+            text=f"{n} connection{'s' if n != 1 else ''} changed — review before finalizing",
+            font=ctk.CTkFont(size=14, weight="bold"), text_color="#c05621",
+        ).pack(anchor="w", padx=20, pady=(18, 2))
+        ctk.CTkLabel(
+            win, text="Removing that hardware left these set to Spare or unsourced. "
+            "“Wiring reviewed” was unchecked so you can confirm the new topology.",
+            wraplength=520, justify="left", text_color="gray40",
+        ).pack(anchor="w", padx=20, pady=(0, 8))
+
+        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=12, pady=4)
+        body.columnconfigure(0, weight=1)
+        auto_hide_scrollbar(body)
+        for r, ch in enumerate(changes):
+            ctk.CTkLabel(body, text=f"•  {ch.message}", anchor="w",
+                         justify="left", wraplength=520).grid(
+                row=r, column=0, sticky="w", padx=8, pady=2)
+
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill="x", padx=20, pady=(4, 16))
+        affected_tabs = [t for t in ("SPLITTERS", "KEYPADS")
+                         if any(c.tab == t for c in changes)]
+        for tab_name in affected_tabs:
+            ctk.CTkButton(
+                btns, text=f"Review {tab_name}", height=32,
+                fg_color="transparent", border_width=1, border_color=ACCENT,
+                text_color=ACCENT, hover_color=("gray90", "gray25"),
+                command=lambda t=tab_name: (self.tabs.set(t),
+                                            win.grab_release(), win.destroy()),
+            ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btns, text="Dismiss", height=32, fg_color=ACCENT,
+                      hover_color=ACCENT_HOVER,
+                      command=lambda: (win.grab_release(), win.destroy()),
+                      ).pack(side="right")
 
     def _add_expander_clicked(self):
         prompt_add_expander(self.root, self.session, self._on_structure_change)
