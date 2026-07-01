@@ -1,48 +1,89 @@
 # DMP WS & Door Chart Generator
 
 Desktop app (macOS + Windows) that turns a security-system design PDF into two
-Excel deliverables: a **DMP Installation Worksheet** and a **Door Chart**.
+Excel deliverables: a **DMP Installation Worksheet** and a **Door Chart** —
+with a built-in editor for correcting the design in the field before anything
+is generated.
 
-One codebase runs on both operating systems — platform differences are handled
-at runtime via `sys.platform` checks. The app is built into a native `.app`
-(macOS) or a one-folder app — a folder holding the `.exe` (Windows).
+![Project editor — ZONES tab](docs/screenshots/editor-zones.png)
 
-## Application shell (v1.2)
+## What it does
 
-Landscape window (1000×680) with desktop-app chrome: a slim toolbar (brand
-mark, project name with unsaved-changes dot, Open / Save / Export Draft /
-Finalize), the editor filling the window, and a status bar (save state,
-validation chips, collapsible terminal). The full ConvergeOne logo appears
-only on the home screen.
+**Inputs** (drag-and-drop or File → Open):
 
-## Hardware changes (v1.3)
+- a security design PDF (OCR'd automatically if it isn't searchable),
+- an existing DMP worksheet (`.xlsx`), or
+- a saved project (`.dmps`) from a previous visit.
 
-Post-CAD hardware changes happen in the editor: add or remove **714-16/714-8
-expanders** (each brings its RSP + power supply + zone block — DMP bus
-addressing: module 7 starts Z601), **710 splitters** (LX or KP), and
-**keypads**. Removal scrubs dangling references (splitter outputs → Spare,
-orphaned keypad sources flagged by the finalize gate). Template capacities
-are enforced: 15 expanders, 12 splitters per type, 28 keypads.
+**Outputs** — revision-numbered Excel files, generated on demand from the
+editor:
 
-## Field-edit workflow (v1.1)
+- `school_dmp_rev1.xlsx`, `rev2`, … — the DMP Installation Worksheet
+- `school_door_chart_rev1.xlsx`, … — the Door Chart, built from the newest
+  worksheet
 
-The app is the working document; the Excel files are output artifacts.
+Prior revisions are kept on disk, so the working loop is: **generate → print →
+review with the site superintendent → edit → regenerate.**
 
-1. **Import** — drop a design PDF, a DMP worksheet (`.xlsx`), or a saved
-   project (`.dmps`). Parsing lands in a tabbed editor (SITE / ZONES /
-   SPLITTERS / KEYPADS / POWER).
-2. **Edit & save** — correct what the prints got wrong (zone descriptions,
-   splitter wiring, RSP locations). Explicit save (`Ctrl/Cmd+S`) writes a
-   `.dmps` project file (plain JSON) under `<output>/Sessions/`; a background
-   recovery file guards against crashes. Projects reopen from the home
-   screen's Recent Projects list, across days and site visits.
-3. **Export Draft** — anytime; the file is stamped `DRAFT`, carries a
-   NOT-FOR-INSTALL banner, and is refused on re-import (the project file is
-   the source of truth).
-4. **Finalize** — a validation gate (required IP/gateway/tech/date, no blank
-   or placeholder zone descriptions, `RSP-N`/`SPARE` naming, conflicts
-   resolved, wiring reviewed) must pass before the `FINAL`-stamped worksheet
-   and door chart are generated.
+## Workflow
+
+### 1. Import
+
+Drop a file on the home screen. PDFs are OCR'd if needed, then parsed for the
+zone schedule, splitter topology, RSPs, and keypads. The home screen lists
+recent projects for one-click reopening across days and site visits.
+
+![Home screen](docs/screenshots/home.png)
+
+### 2. Edit
+
+Parsing lands in a tabbed editor — **SITE / ZONES / SPLITTERS / KEYPADS /
+POWER** — which is the working document; the Excel files are artifacts
+generated from it and are never re-imported.
+
+- **ZONES** — searchable grid with inline editing and filter chips (All /
+  Needs attention / Spares / Errors).
+- **SPLITTERS** — the wiring topology, CAD-print conflict resolution, and a
+  "Wiring reviewed against the riser diagram" checkbox.
+- **Hardware changes** — add or remove **714-16/714-8 expanders** (each brings
+  its RSP + power supply + zone block — DMP bus addressing: module 7 starts
+  Z601), **710 splitters** (LX or KP), and **keypads**. Removal re-points
+  dependent wiring to Spare and pops a review summary that routes you to the
+  affected connections. Location fields autocomplete from locations already in
+  the project. Template capacities are enforced: 15 expanders, 12 splitters
+  per type, 28 keypads.
+- **Validation** runs live (status-bar chips per tab: required IP/gateway/
+  tech/date, no blank or placeholder zone descriptions, `RSP-N`/`SPARE`
+  naming, conflicts resolved, wiring reviewed). It warns — it never blocks.
+
+![SPLITTERS tab](docs/screenshots/editor-splitters.png)
+
+### 3. Generate
+
+Two buttons at the bottom of the editor (also Worksheet menu / keyboard):
+
+- **Generate Worksheet** (`Cmd/Ctrl+E`) — writes the next worksheet revision.
+- **Generate Door Chart** (`Cmd/Ctrl+D`) — builds the chart from the newest
+  worksheet, warning if the design has changed since that worksheet was
+  generated.
+
+If validation issues are open you get a summary with "Go to" jumps — generate
+anyway, or fix things first; your call.
+
+![Pre-generate check](docs/screenshots/generate-check.png)
+
+Generation runs in the background — you stay in the editor the whole time, and
+a notification offers to open the finished file.
+
+![Completion toast](docs/screenshots/toast.png)
+
+## Projects & saving
+
+Saving is explicit — the Save button or `Cmd/Ctrl+S` writes a `.dmps` project
+file (plain JSON) under `<output>/Sessions/`. A debounced background recovery
+file guards against crashes; unsaved work is offered for recovery on reopen.
+In-app help lives under **Help → Field-Edit Workflow / Keyboard Shortcuts**,
+plus hover tooltips on the less obvious controls.
 
 ## Repository layout
 
@@ -55,10 +96,16 @@ The app is the working document; the Excel files are output artifacts.
 | `build_mac.command` / `build_windows.bat` | Per-machine build scripts |
 | `.github/workflows/release.yml` | CI: builds both OSes on a version tag |
 | `logos/`, `*.xlsx` | Branding assets and Excel templates |
+| `docs/screenshots/` | README images (demo data only) |
 | `docs/` | Design specs |
 
 Build output, virtualenvs, and working data are **not** committed — see
-`.gitignore`. Each machine builds locally; nothing platform-specific is shared.
+`.gitignore`. One codebase runs on both operating systems — platform
+differences are handled at runtime via `sys.platform` checks.
+
+> **Data hygiene:** this repository is public. `input/` is gitignored on
+> purpose — never commit real school design files, worksheets, or screenshots
+> containing them. README screenshots use a fabricated demo project.
 
 ## Developer setup (new machine)
 
@@ -83,9 +130,9 @@ from GitHub Releases.
 Push a version tag to build both platforms via CI and publish a Release:
 
 ```
-# bump VERSION first (e.g. to 1.0.1), commit, then:
-git tag v1.0.1
-git push origin v1.0.1
+# bump VERSION first (e.g. to 1.0.9), commit, then:
+git tag v1.0.9
+git push origin v1.0.9
 ```
 
 GitHub Actions builds the macOS `.app` and Windows `.exe` and attaches both to a
@@ -132,5 +179,7 @@ antivirus on managed/corporate Windows machines.
 
 Generated worksheets and door charts are written to a folder the user picks
 in-app (**"Save output to → Change…"**), stored per machine. The default is
-`~/Documents/DMP WS & Door Chart Generator/`. Point it at a OneDrive folder to
-sync deliverables across machines, or keep it local.
+`~/Documents/DMP WS & Door Chart Generator/`. Each generate writes the next
+`_revN` file rather than overwriting, so earlier revisions stay available for
+comparison. Point the folder at OneDrive to sync deliverables across machines,
+or keep it local.
