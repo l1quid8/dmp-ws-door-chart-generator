@@ -128,15 +128,17 @@ def test_inject_keeps_excel_table_headers(tmp_path):
     zf = zipfile.ZipFile(out)
 
     def table_header_spans(sheet_num):
-        rels = zt.read(f"xl/worksheets/_rels/sheet{sheet_num}.xml.rels").decode()
+        # Read the OUTPUT's rels: consolidation drops the tables of truncated blocks,
+        # so only surviving tables still name header cells the sheet must keep.
+        rels = zf.read(f"xl/worksheets/_rels/sheet{sheet_num}.xml.rels").decode()
         spans = []
         for t in re.findall(r"tables/(table\d+\.xml)", rels):
-            m = re.search(r'ref="([A-Z]+)(\d+):([A-Z]+)\d+"', zt.read("xl/tables/" + t).decode())
+            m = re.search(r'ref="([A-Z]+)(\d+):([A-Z]+)\d+"', zf.read("xl/tables/" + t).decode())
             if m:
                 spans.append((int(m.group(2)), m.group(1), m.group(3)))
         return spans
 
-    for sheet_num in (4, 5, 6):  # Terminal Cans, RSPs, Power Supplies
+    for sheet_num in (3, 4, 5, 6):  # Terminal Cans, RSPs, Power Supplies, LX-KP-710s
         out_xml = zf.read(f"xl/worksheets/sheet{sheet_num}.xml").decode()
         tpl_xml = zt.read(f"xl/worksheets/sheet{sheet_num}.xml").decode()
         for header_row, c1, c2 in table_header_spans(sheet_num):

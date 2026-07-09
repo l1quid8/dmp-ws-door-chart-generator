@@ -5,6 +5,11 @@ The DMP worksheet is the single source of truth — zones, RSPs, splitters, and 
 info all flow through it. The template (door_chart_template_blank.xlsx) is read-only;
 this module copies it, writes into Master + Header sheets, and saves to output/.
 
+The output is CONSOLIDATED: the template's presentation tabs pre-draw 15 placeholder
+block groups each, and every group past the last filled one is truncated away (with
+its Excel Tables and logo drawings), so the file ships ready to hand off — no manual
+deletion of empty door chart scaffolding.
+
 Master sheet write surface (everything else inherits via formulas):
   Header!B3                — school name (from dmp_design.site_info.school_name)
 
@@ -217,6 +222,136 @@ def _retarget_power_supplies(xml: str, dmp_design: DMPDesign) -> str:
     return xml
 
 
+def _consolidate_lx(xml: str, filled_rows: list[int]) -> str:
+    """Compact the LX-KP-710s tab. The template pre-wires 30 chart slots to Master
+    topology rows 29..63 in reading order, but a job's real splitters are scattered
+    across the per-bus sections (e.g. the first KP splitter sits ~20 slots down).
+    Point the earliest slots at the filled Master rows, in order, so truncation can
+    always cut at a group boundary.
+
+    Slot geometry: title {B|E}T = =Master!C{row}; data {C|F}{T+2..T+5} = =Master!{D..G}{row}.
+    T+1 is the slot's Excel Table header row — blanking it corrupts the named table.
+    """
+    slots = sorted(((int(m.group(2)), m.group(1)) for m in re.finditer(
+        r'<c r="([BE])(\d+)"[^>]*?><f>Master!C\d+</f>', xml)),
+        key=lambda s: (s[0], 0 if s[1] == "B" else 1))
+    kept_slots = 2 * max(1, (len(filled_rows) + 1) // 2)  # whole groups of two
+    for k, (T, col) in enumerate(slots):
+        c2 = "C" if col == "B" else "F"
+        if k < len(filled_rows):
+            xml = _set_cell_master_row(xml, f"{col}{T}", filled_rows[k])
+            for off in range(2, 6):
+                xml = _set_cell_master_row(xml, f"{c2}{T + off}", filled_rows[k])
+        elif k < kept_slots:
+            # Leftover slot inside the last kept group (odd splitter count, or none at
+            # all): blank its title, labels and data — skipping the table header row.
+            for r in range(T, T + 6):
+                if r == T + 1:
+                    continue
+                xml = _blank_cell(xml, f"{col}{r}")
+                xml = _blank_cell(xml, f"{c2}{r}")
+        # Slots past the kept groups fall below the cutoff; _truncate_rows removes them.
+    return xml
+
+
+# -------- consolidation: truncate empty placeholder blocks --------
+#
+# Each presentation sheet carries 15 pre-drawn block groups (two charts per group,
+# left cols B.. / right cols E../F..). Retargeting fills only the first groups, so the
+# finished document should end right after the last filled group — the hand-finished
+# deliverables always deleted the empty scaffolding below. We truncate each sheet at a
+# group boundary and drop the orphaned Excel Tables and logo drawing anchors so Excel
+# doesn't see dangling parts ("repair file").
+
+_SHEET_LAYOUT = {
+    # part -> (block-group pitch, a group's last content row relative to its start row)
+    "xl/worksheets/sheet3.xml": (25, 24),  # Terminal Cans
+    "xl/worksheets/sheet4.xml": (26, 23),  # RSPs (irregular: group 10 starts a row early)
+    "xl/worksheets/sheet5.xml": (12, 10),  # Power Supplies
+    "xl/worksheets/sheet6.xml": (12, 10),  # LX-KP-710s
+}
+_N_GROUPS = 15
+
+
+def _sheet_cutoff(xml: str, part: str, n_charts: int) -> int:
+    """Last worksheet row to KEEP on a presentation sheet holding `n_charts` charts.
+
+    Group start rows are read from the sheet's own =Header!B3 header cells rather
+    than computed (the RSPs tab's group 10 breaks the uniform pitch). The Power
+    Supplies / LX tabs stop carrying Header!B3 on later groups, but their chart
+    slots stay on the regular pitch — extrapolate.
+    """
+    pitch, last_off = _SHEET_LAYOUT[part]
+    starts = sorted({int(m.group(1)) for m in re.finditer(
+        r'<c r="[A-Z]+(\d+)"[^>]*?><f>Header!B3</f>', xml)})
+    if not starts or starts[0] != 2:
+        raise AssertionError(
+            f"{part}: no block-group header at row 2 — template layout changed, "
+            "update _SHEET_LAYOUT")
+    while len(starts) < _N_GROUPS:
+        starts.append(starts[-1] + pitch)
+    g = min(max(1, (n_charts + 1) // 2), _N_GROUPS)  # two charts per group, keep >= 1
+    cutoff = starts[g - 1] + last_off
+    assert g == _N_GROUPS or cutoff < starts[g], \
+        f"{part}: cutoff {cutoff} overlaps group {g + 1} (row {starts[g]})"
+    return cutoff
+
+
+def _truncate_rows(xml: str, cutoff: int) -> str:
+    """Delete every sheet row past `cutoff`, the merges that covered them, and shrink
+    the declared dimension. Cutoffs are group-aligned, so nothing straddles."""
+    starts = [(m.start(), int(m.group(1))) for m in re.finditer(r'<row r="(\d+)"', xml)]
+    assert all(a[1] < b[1] for a, b in zip(starts, starts[1:])), "sheet rows not ascending"
+    first_cut = next((pos for pos, r in starts if r > cutoff), None)
+    if first_cut is not None:
+        xml = xml[:first_cut] + xml[xml.index("</sheetData>"):]
+
+    mc = re.search(r'<mergeCells count="\d+">(.*?)</mergeCells>', xml, re.S)
+    if mc:
+        kept = []
+        for mm in re.finditer(r'<mergeCell ref="[A-Z]+(\d+):[A-Z]+(\d+)"/>', mc.group(1)):
+            lo, hi = sorted((int(mm.group(1)), int(mm.group(2))))
+            if lo > cutoff:
+                continue
+            assert hi <= cutoff, f"merge {mm.group(0)} straddles truncation cutoff {cutoff}"
+            kept.append(mm.group(0))
+        xml = (xml[:mc.start()]
+               + f'<mergeCells count="{len(kept)}">' + "".join(kept) + "</mergeCells>"
+               + xml[mc.end():])
+
+    xml = re.sub(r'(<dimension ref="[A-Z]+\d+:[A-Z]+)(\d+)"/>',
+                 lambda m: f'{m.group(1)}{min(cutoff, int(m.group(2)))}"/>', xml, count=1)
+    return xml
+
+
+def _drop_table_parts(xml: str, drop_rids: set[str]) -> str:
+    """Remove <tablePart> entries for dropped tables and fix the count attribute."""
+    for rid in drop_rids:
+        xml = re.sub(r'<tablePart r:id="%s"/>' % re.escape(rid), "", xml)
+    m = re.search(r'<tableParts count="\d+">', xml)
+    if m:
+        n = len(re.findall(r"<tablePart ", xml))
+        xml = xml[:m.start()] + f'<tableParts count="{n}">' + xml[m.end():]
+    return xml
+
+
+def _strip_drawing_anchors(xml: str, cutoff: int) -> str:
+    """Remove logo anchors that start past the truncation cutoff (anchor rows are
+    0-based, so a 0-based `from` row >= cutoff lies on an Excel row > cutoff)."""
+    def drop(m: re.Match) -> str:
+        fr = re.search(r"<xdr:from>.*?<xdr:row>(\d+)</xdr:row>", m.group(0), re.S)
+        return "" if fr and int(fr.group(1)) >= cutoff else m.group(0)
+    return re.sub(r"<xdr:(twoCellAnchor|oneCellAnchor)\b.*?</xdr:\1>", drop, xml, flags=re.S)
+
+
+def _drop_rels(rels_xml: str, target_names: set[str]) -> str:
+    """Remove Relationship entries whose Target basename is in `target_names`."""
+    def drop(m: re.Match) -> str:
+        t = re.search(r'Target="[^"]*?([^/"]+)"', m.group(0))
+        return "" if t and t.group(1) in target_names else m.group(0)
+    return re.sub(r"<Relationship\b[^>]*?/>", drop, rels_xml)
+
+
 def _find_rsp(rsps: list[RSP], number: int) -> RSP | None:
     return next((r for r in rsps if r.number == number), None)
 
@@ -320,7 +455,7 @@ def _populate_xr550_config(master, dmp_design: DMPDesign) -> int:
     return n_populated
 
 
-def _populate_splitter_topology(master, dmp_design: DMPDesign) -> tuple[int, int]:
+def _populate_splitter_topology(master, dmp_design: DMPDesign) -> tuple[list[int], int]:
     """Populate Master rows 29-63 (SPLITTER TOPOLOGY sub-table).
 
     Strategy:
@@ -330,8 +465,11 @@ def _populate_splitter_topology(master, dmp_design: DMPDesign) -> tuple[int, int
       2. For each pre-seeded slot ID in template column A (rows 29-63), fill cols
          B (location), C (combined section title), D (combus input), and E/F/G
          (combus outputs 1/2/3) from the matching DMP splitter.
+
+    Returns (filled Master rows in ascending order, cells written) — the row list
+    drives the LX-KP-710s tab's chart compaction.
     """
-    n_splitters = 0
+    filled_rows: list[int] = []
     n_cells = 0
     slot_to_splitter = _build_slot_to_splitter_map(dmp_design)
 
@@ -342,7 +480,7 @@ def _populate_splitter_topology(master, dmp_design: DMPDesign) -> tuple[int, int
         s = slot_to_splitter.get(str(slot_id).strip())
         if not s:
             continue
-        n_splitters += 1
+        filled_rows.append(row)
 
         # Col B — LOCATION
         if s.location:
@@ -369,7 +507,7 @@ def _populate_splitter_topology(master, dmp_design: DMPDesign) -> tuple[int, int
                 master[f"{col}{row}"] = out
                 n_cells += 1
 
-    return n_splitters, n_cells
+    return filled_rows, n_cells
 
 
 def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> None:
@@ -452,7 +590,8 @@ def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> Non
 
     # 3. XR-550 CONFIG + SPLITTER TOPOLOGY (always populated)
     n_xr550_cells = _populate_xr550_config(master, dmp_design)
-    n_splitters, n_splitter_cells = _populate_splitter_topology(master, dmp_design)
+    lx_filled_rows, n_splitter_cells = _populate_splitter_topology(master, dmp_design)
+    n_splitters = len(lx_filled_rows)
 
     # openpyxl's wb.save strips parts it doesn't natively understand — including
     # xl/drawings/* and xl/media/* (the LAUSD + ConvergeOne logos). Save openpyxl's
@@ -460,12 +599,13 @@ def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> Non
     # only the parts we need:
     #   - sheet1.xml (Header) and sheet2.xml (Master) — the two sheets we modify
     #   - workbook.xml — carries fullCalcOnLoad=True so Excel recomputes on open
-    #     (sheets 3-7 are formula sheets like '=Master!B5'; without recompute
+    #     (sheets 3-6 are formula sheets like '=Master!B5'; without recompute
     #     they show stale cached values from the template's last save)
     #
-    # Sheets 3-7 (MSP, Terminal Cans, RSPs, Power Supplies, LX-KP-710s) have
+    # Sheets 3-6 (Terminal Cans, RSPs, Power Supplies, LX-KP-710s) have
     # <tablePart> + <drawing> references whose rels point at template files —
-    # we leave their XML untouched to avoid desync (which causes "repair file").
+    # beyond the surgical edits below we leave their XML untouched to avoid
+    # desync (which causes "repair file").
     #
     # We also strip xl/calcChain.xml: it's a cached calculation order. With it
     # present + cached values in the template's formula cells, Excel skips the
@@ -485,12 +625,56 @@ def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> Non
     # Retarget the presentation tabs to the contiguous Master: each RSP block points to
     # its real rows, 8-port blocks are reshaped (8 rows → AUX → blanks), and unused module
     # blocks are blanked. In-place XML edits keep each sheet's <tablePart>/<drawing> intact.
-    #   sheet4 = Terminal Cans, sheet5 = RSPs, sheet6 = Power Supplies
+    #   sheet3 = Terminal Cans, sheet4 = RSPs, sheet5 = Power Supplies, sheet6 = LX-KP-710s
     PRESENTATION_REWRITERS = {
-        "xl/worksheets/sheet4.xml": lambda x: _retarget_zone_tab(x, "tc", dmp_design),
-        "xl/worksheets/sheet5.xml": lambda x: _retarget_zone_tab(x, "rsps", dmp_design),
-        "xl/worksheets/sheet6.xml": lambda x: _retarget_power_supplies(x, dmp_design),
+        "xl/worksheets/sheet3.xml": lambda x: _retarget_zone_tab(x, "tc", dmp_design),
+        "xl/worksheets/sheet4.xml": lambda x: _retarget_zone_tab(x, "rsps", dmp_design),
+        "xl/worksheets/sheet5.xml": lambda x: _retarget_power_supplies(x, dmp_design),
+        "xl/worksheets/sheet6.xml": lambda x: _consolidate_lx(x, lx_filled_rows),
     }
+
+    # Consolidation drop plan: read the template's sheet rels to find each sheet's
+    # Excel Tables and drawing part, then mark every table that lies entirely past its
+    # sheet's cutoff. A dropped table must vanish from four places atomically — the zip
+    # part, the sheet's rels, its <tablePart> element, and [Content_Types].xml — or
+    # Excel flags the file for repair.
+    chart_counts = {
+        # TC/RSPs blocks fill in visual order (block i = RSP i+1); PS charts sit at
+        # their module NUMBER's slot; LX slots were compacted to the filled count.
+        "xl/worksheets/sheet3.xml": len(dmp_design.rsps),
+        "xl/worksheets/sheet4.xml": len(dmp_design.rsps),
+        "xl/worksheets/sheet5.xml": max((r.number for r in dmp_design.rsps), default=0),
+        "xl/worksheets/sheet6.xml": n_splitters,
+    }
+    cutoffs: dict[str, int] = {}                  # sheet part -> last row to keep
+    drop_parts: set[str] = set()                  # xl/tables/tableNN.xml parts to omit
+    sheet_drop_rids: dict[str, set[str]] = {}     # sheet part -> tablePart rIds to remove
+    rels_drop_names: dict[str, set[str]] = {}     # rels part -> table basenames to remove
+    drawing_cutoffs: dict[str, int] = {}          # drawing part -> its sheet's cutoff
+    with zipfile.ZipFile(template_path) as ztpl:
+        for sheet_part, n_charts in chart_counts.items():
+            cutoff = _sheet_cutoff(ztpl.read(sheet_part).decode("utf-8"),
+                                   sheet_part, n_charts)
+            cutoffs[sheet_part] = cutoff
+            rels_part = sheet_part.replace("worksheets/", "worksheets/_rels/") + ".rels"
+            for rm in _re.finditer(r"<Relationship\b[^>]*?/>",
+                                   ztpl.read(rels_part).decode("utf-8")):
+                rid = _re.search(r'Id="(rId\d+)"', rm.group(0)).group(1)
+                target = _re.search(r'Target="([^"]+)"', rm.group(0)).group(1)
+                name = target.rsplit("/", 1)[-1]
+                if "/tables/" in target:
+                    ref = _re.search(r'<table [^>]*?\bref="[A-Z]+(\d+):[A-Z]+(\d+)"',
+                                     ztpl.read("xl/tables/" + name).decode("utf-8"))
+                    lo, hi = sorted((int(ref.group(1)), int(ref.group(2))))
+                    if lo > cutoff:
+                        drop_parts.add("xl/tables/" + name)
+                        sheet_drop_rids.setdefault(sheet_part, set()).add(rid)
+                        rels_drop_names.setdefault(rels_part, set()).add(name)
+                    else:
+                        assert hi <= cutoff, \
+                            f"table {name} ({lo}:{hi}) straddles cutoff {cutoff} on {sheet_part}"
+                elif "/drawings/" in target:
+                    drawing_cutoffs["xl/drawings/" + name] = cutoff
 
     with NamedTemporaryFile(delete=False, suffix=".xlsx") as tmpf:
         openpyxl_tmp_path = Path(tmpf.name)
@@ -509,19 +693,36 @@ def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> Non
         with zipfile.ZipFile(output_path, "r") as zin, \
              zipfile.ZipFile(rebuild_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.namelist():
-                if item in DROP_FILES:
+                if item in DROP_FILES or item in drop_parts:
                     continue
                 if item == "[Content_Types].xml":
                     # Drop the calcChain Override declaration (otherwise Excel
                     # complains about a missing part). Use [^>]*? to span attribute
                     # values containing slashes (e.g. ContentType MIME values).
+                    # Same for every table part dropped by consolidation.
                     ct = zin.read(item).decode("utf-8")
                     ct = _re.sub(
                         r'<Override\s+PartName="/xl/calcChain\.xml"[^>]*?/>',
                         "",
                         ct,
                     )
+                    for part in drop_parts:
+                        ct = _re.sub(
+                            r'<Override\s+PartName="/%s"[^>]*?/>' % _re.escape(part),
+                            "",
+                            ct,
+                        )
                     zout.writestr(item, ct.encode("utf-8"))
+                    continue
+                if item in rels_drop_names:
+                    rels = zin.read(item).decode("utf-8")
+                    rels = _drop_rels(rels, rels_drop_names[item])
+                    zout.writestr(item, rels.encode("utf-8"))
+                    continue
+                if item in drawing_cutoffs:
+                    xml = zin.read(item).decode("utf-8")
+                    xml = _strip_drawing_anchors(xml, drawing_cutoffs[item])
+                    zout.writestr(item, xml.encode("utf-8"))
                     continue
                 if item == "xl/_rels/workbook.xml.rels":
                     # Drop the calcChain Relationship for the same reason
@@ -535,7 +736,10 @@ def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> Non
                     continue
                 if item in PRESENTATION_REWRITERS:
                     xml = zin.read(item).decode("utf-8")
-                    zout.writestr(item, PRESENTATION_REWRITERS[item](xml).encode("utf-8"))
+                    xml = PRESENTATION_REWRITERS[item](xml)
+                    xml = _drop_table_parts(xml, sheet_drop_rids.get(item, set()))
+                    xml = _truncate_rows(xml, cutoffs[item])
+                    zout.writestr(item, xml.encode("utf-8"))
                     continue
                 data = overlays.get(item, zin.read(item))
                 zout.writestr(item, data)
