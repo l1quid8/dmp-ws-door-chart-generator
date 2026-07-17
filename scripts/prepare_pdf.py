@@ -173,7 +173,7 @@ def prepare(input_pdf: Path, output_pdf: Path | None = None) -> Path:
             input_pdf,
             output_pdf,
             force_ocr=True,
-            skip_big=200,
+            max_image_mpixels=0,  # disable Pillow decompression-bomb guard for large design sheets
             output_type="pdf",
             progress_bar=False,
         )
@@ -182,7 +182,7 @@ def prepare(input_pdf: Path, output_pdf: Path | None = None) -> Path:
         cmd = [
             find_ocrmypdf(),
             "--force-ocr",
-            "--skip-big", "200",
+            "--max-image-mpixels", "0",
             "--output-type", "pdf",
             "--quiet",
             str(input_pdf),

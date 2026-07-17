@@ -190,6 +190,18 @@ class App:
         self._build_layout()
         self._show_drop_zone()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Route EVERY quit path through _on_close/_shutdown. The red close button
+        # fires WM_DELETE_WINDOW, but the macOS Apple-menu Quit and Cmd-Q hit Tk's
+        # default handler, which tears down Tcl (Tcl_Exit -> C exit()) while the
+        # Python interpreter is finalizing — that runs PyMuPDF's global-context
+        # destructor, which flushes buffered MuPDF warnings back into a dead
+        # interpreter and segfaults. Intercepting the Apple-menu Quit makes those
+        # paths use our hard-exit shutdown instead.
+        if sys.platform == "darwin":
+            try:
+                self.root.createcommand("::tk::mac::Quit", self._on_close)
+            except Exception:
+                pass
 
         # Tk swallows exceptions raised inside widget callbacks, which reads
         # as "the button does nothing". Surface them instead.
@@ -1158,9 +1170,11 @@ class App:
         def proceed():
             design = self.session.design
             sync_master_zones(design)
-            # Persist the per-machine site defaults (phone, tech, IP, ...).
+            # Persist the per-machine site defaults (tech, IP, ...). Phone is
+            # school-specific (auto-looked-up per site), not a machine default,
+            # so it's deliberately excluded — persisting it would carry one
+            # school's number into the next project.
             save_prefs({**load_prefs(),
-                        "phone": design.site_info.phone or "",
                         "install_tech": design.site_info.install_tech or "",
                         "install_date": design.site_info.install_date or "",
                         "ip_address": design.site_info.ip_address or "",
@@ -1479,20 +1493,37 @@ class App:
         messagebox.showerror("Update failed", f"{msg}\n\nYou can download the latest "
                              "build from the GitHub releases page.")
 
+    def _shutdown(self):
+        """Exit the process immediately, skipping interpreter/library teardown.
+
+        A normal Tk teardown runs C++ static destructors (notably PyMuPDF's
+        global MuPDF context) while Python is finalizing; that destructor
+        flushes buffered MuPDF warnings through a Python callback into a
+        half-dead interpreter and segfaults on quit. os._exit sidesteps the
+        whole chain. Safe here because the app persists all state during use
+        (prefs on generate; .dmps via the editor save-prompt) — nothing
+        important runs in atexit/finalizers.
+        """
+        try:
+            self.root.withdraw()  # instant visual close before the hard exit
+        except Exception:
+            pass
+        os._exit(0)
+
     def _quit_for_update(self):
         """Quit so the detached helper can replace files and relaunch."""
         if self.state == "editing" and self.editor and not self.editor.maybe_close():
             return  # user cancelled the save prompt — leave the app open
-        self.root.destroy()
+        self._shutdown()
 
     def _on_close(self):
         if self._generating is not None:
             if messagebox.askyesno("Quit?", "Generation in progress — quit anyway?"):
-                self.root.destroy()
+                self._shutdown()
             return
         if self.state == "editing" and self.editor and not self.editor.maybe_close():
             return
-        self.root.destroy()
+        self._shutdown()
 
     def run(self):
         self.root.mainloop()

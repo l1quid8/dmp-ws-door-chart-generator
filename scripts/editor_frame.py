@@ -502,11 +502,14 @@ class EditorFrame(ctk.CTkFrame):
             self._notify_status()
 
     def prefill_site_defaults(self, prefs: dict):
-        """Fill empty site fields from per-machine prefs (phone, tech, …) the way
-        the old job-details form did. Doesn't overwrite parsed values."""
+        """Fill empty site fields from per-machine prefs (tech, IP, …) the way
+        the old job-details form did. Doesn't overwrite parsed values.
+
+        Phone is intentionally not prefilled from prefs: it's school-specific
+        (auto-looked-up per site from the bundled directory), so a prefs value
+        would be a stale number from a previous project."""
         from datetime import date as _date
         defaults = {
-            "phone": prefs.get("phone", ""),
             "install_tech": prefs.get("install_tech", ""),
             "install_date": prefs.get("install_date", _date.today().isoformat()),
             "ip_address": prefs.get("ip_address", ""),

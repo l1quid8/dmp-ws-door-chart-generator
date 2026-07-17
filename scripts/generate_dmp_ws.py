@@ -569,6 +569,19 @@ def build_dmp_design_from_pdf(
     design.site_info.school_code = school_code
     design.site_info.address_line1 = parsed.school_info.get("address_line1")
     design.site_info.address_line2 = parsed.school_info.get("address_line2")
+
+    # The school phone isn't printed on the design PDF, so look it up live from
+    # the LAUSD directory (school_lookup) by street number + ZIP. Fill only when
+    # blank so a re-imported/edited value is preserved; editable in the SITE tab.
+    if not (design.site_info.phone or "").strip():
+        from school_lookup import lookup_phone
+        phone = lookup_phone(
+            design.site_info.school_name or "",
+            design.site_info.address_line1 or "",
+            design.site_info.address_line2 or "",
+        )
+        if phone:
+            design.site_info.phone = phone
     msp_location = None
     for dev in devices:
         if dev.kind == "MSP" and dev.location:
@@ -860,7 +873,10 @@ def write_dmp_xlsx(design: DMPDesign, template_path: Path, output_path: Path,
     _write_cell_safe(ws, "B12", design.site_info.school_code)
     _write_cell_safe(ws, "B14", design.site_info.phone)
     _write_cell_safe(ws, "B18", design.site_info.install_tech)
-    _write_cell_safe(ws, "B20", design.site_info.install_date)
+    # Default to the worksheet's generation date when no install date was set
+    # (parsed or entered) — but never clobber one the user already provided.
+    install_date = design.site_info.install_date or date.today().strftime("%B %d %Y").upper()
+    _write_cell_safe(ws, "B20", install_date)
     # B22 = "DMP XR550" (panel type — pre-filled in template)
     _write_cell_safe(ws, "B24", design.site_info.ip_address)
     # B25 = SUBNET MASK (pre-filled "255.255.255.0")

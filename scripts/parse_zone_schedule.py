@@ -13,6 +13,7 @@ OCR errors are corrected:
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -105,6 +106,9 @@ def extract_school_info(text: str) -> dict:
 
     # Location code: usually a 4-5 digit number near "LOC CODE".
     # OCR splits it across lines: "5726\nLOC \nCODE", so allow whitespace (incl. newlines) between LOC and CODE.
+    # NOTE: this text-only match is a fallback for callers that only have page
+    # text (no geometry) — parse_searchable_pdf() prefers the more reliable
+    # word-position lookup below and overrides this when it finds a match.
     m = re.search(r"(\d{4,5})\s*\n+\s*LOC\s+CODE", text, re.IGNORECASE)
     if m:
         info["loc_code"] = m.group(1).strip()
@@ -115,6 +119,65 @@ def extract_school_info(text: str) -> dict:
             info["loc_code"] = m2.group(1).strip()
 
     return info
+
+
+def _extract_loc_code_from_page(page, exclude: set[str]) -> Optional[str]:
+    """Find the location-code number nearest the 'LOC'/'CODE' title-block label
+    on this page, using word position rather than text order.
+
+    CAD title blocks stack fields in a tight vertical column (often rotated
+    90 degrees on large-format sheets), so the label and its value share the
+    same x-column while unrelated numbers (address ZIP, street number,
+    project number, sheet numbers) sit in adjacent columns. OCR's *text*
+    order across that column is unreliable — e.g. it may emit
+    "...CA 91605\nLOC CODE\n7399", which makes the ZIP look like it precedes
+    the label — but word coordinates aren't affected by that reordering.
+    Anchoring on the label's x-position and picking the closest same-page
+    4-5 digit number by x-distance reliably beats a "nearest text" pattern.
+    """
+    words = page.get_text("words")  # (x0, y0, x1, y1, text, block, line, word_no)
+    loc_words = [w for w in words if w[4].strip(":").upper() == "LOC"]
+    code_words = [w for w in words if w[4].strip(":").upper() == "CODE"]
+    if not loc_words or not code_words:
+        return None
+
+    # Pair each "LOC" word with its nearest "CODE" word and keep the closest
+    # pair. This must be the *nearest* pairing, not an average of every "LOC"
+    # / "CODE" occurrence on the page — sheets often carry unrelated "CODE"
+    # mentions elsewhere (e.g. building-code-year callouts like "2019 CBC
+    # Code"), and averaging those in would drag the anchor away from the
+    # real title-block label.
+    best_pair = None
+    best_dist = None
+    for lw in loc_words:
+        lx, ly = (lw[0] + lw[2]) / 2, (lw[1] + lw[3]) / 2
+        for cw in code_words:
+            cx, cy = (cw[0] + cw[2]) / 2, (cw[1] + cw[3]) / 2
+            dist = ((lx - cx) ** 2 + (ly - cy) ** 2) ** 0.5
+            if best_dist is None or dist < best_dist:
+                best_dist, best_pair = dist, (lw, cw)
+    if best_pair is None or best_dist > 150:
+        return None  # no "LOC" sits near enough to a "CODE" to be the real label
+
+    lw, cw = best_pair
+    label_x = ((lw[0] + lw[2]) / 2 + (cw[0] + cw[2]) / 2) / 2
+    label_y = ((lw[1] + lw[3]) / 2 + (cw[1] + cw[3]) / 2) / 2
+
+    candidates: list[tuple[float, str]] = []
+    for w in words:
+        t = w[4].strip()
+        if not re.fullmatch(r"\d{4,5}", t):
+            continue
+        if t in exclude:
+            continue
+        cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
+        if abs(cy - label_y) > 600:
+            continue  # too far away vertically to plausibly be this title block
+        candidates.append((abs(cx - label_x), t))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0])
+    return candidates[0][1]
 
 
 # Single-line full address pattern (used against the title-block / page-1 text).
@@ -345,16 +408,18 @@ def parse_searchable_pdf(pdf_path: str | Path) -> ParsedDesign:
     doc = fitz.open(str(pdf_path))
     # Concatenate text from all pages — the zone schedule is on the page that contains it
     full_text_per_page: dict[int, str] = {i: p.get_text("text") for i, p in enumerate(doc)}
-    doc.close()
 
     # Find the page containing the zone schedule (look for "MOTION DETECTOR ZONE SCHEDULE" header)
     schedule_text = ""
+    schedule_page_idx: Optional[int] = None
     for i, t in full_text_per_page.items():
         if "MOTION DETECTOR ZONE SCHEDULE" in t.upper():
             schedule_text = t
+            schedule_page_idx = i
             break
     if not schedule_text:
         # Fall back: assume page 10 (index 9) per the C1 standard sheet ordering
+        schedule_page_idx = 9 if 9 in full_text_per_page else None
         schedule_text = full_text_per_page.get(9, "")
 
     design = ParsedDesign()
@@ -365,6 +430,36 @@ def parse_searchable_pdf(pdf_path: str | Path) -> ParsedDesign:
     title_text = full_text_per_page.get(0, "")
     for k, v in extract_address_from_title_block(title_text).items():
         design.school_info.setdefault(k, v)
+
+    # Every large-format sheet in a C1 design repeats its own copy of the
+    # title block, and the loc-code number isn't always on the schedule page
+    # or page 0 — nor is the copy that IS present guaranteed to OCR text in
+    # the right order (see _extract_loc_code_from_page). So search every page
+    # using word position (unaffected by OCR text reordering) and take the
+    # value that wins a majority vote: the real loc-code is printed
+    # identically on every sheet, while an occasional false-positive
+    # alignment (e.g. the contractor's own office ZIP landing in the label's
+    # column on one particular sheet's layout — seen on a cover page) only
+    # ever wins on a minority of pages.
+    exclude: set[str] = set()
+    addr2 = design.school_info.get("address_line2", "")
+    m = re.search(r"(\d{5})\s*$", addr2)
+    if m:
+        exclude.add(m.group(1))
+    addr1 = design.school_info.get("address_line1", "")
+    m = re.search(r"^(\d+)", addr1)
+    if m:
+        exclude.add(m.group(1))
+
+    votes: Counter = Counter()
+    for i in range(len(doc)):
+        code = _extract_loc_code_from_page(doc[i], exclude)
+        if code:
+            votes[code] += 1
+    if votes:
+        design.school_info["loc_code"] = votes.most_common(1)[0][0]
+
+    doc.close()
     design.combus_lines = extract_combus_lines(schedule_text)
     design.zones = extract_zones(schedule_text)
     return design
