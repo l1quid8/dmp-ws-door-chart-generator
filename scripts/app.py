@@ -1172,13 +1172,14 @@ class App:
         def proceed():
             design = self.session.design
             sync_master_zones(design)
-            # Persist the per-machine site defaults (tech, IP, ...). Phone is
-            # school-specific (auto-looked-up per site), not a machine default,
-            # so it's deliberately excluded — persisting it would carry one
-            # school's number into the next project.
-            save_prefs({**load_prefs(),
+            # Persist the per-machine site defaults (tech, IP, ...). Phone and
+            # install date are deliberately excluded: phone is school-specific
+            # (auto-looked-up per site), and a remembered install date is always
+            # stale on the next project — it defaults to today at import instead.
+            prefs = load_prefs()
+            prefs.pop("install_date", None)  # drop any value saved by older builds
+            save_prefs({**prefs,
                         "install_tech": design.site_info.install_tech or "",
-                        "install_date": design.site_info.install_date or "",
                         "ip_address": design.site_info.ip_address or "",
                         "default_gateway": design.site_info.default_gateway or ""})
 

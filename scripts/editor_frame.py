@@ -36,6 +36,17 @@ ACCENT_HOVER = "#3a6aa8"
 
 RECOVERY_DEBOUNCE_MS = 5000
 
+
+def _format_install_date(d) -> str:
+    """Today's date the way techs write it on the worksheet, e.g. 'JULY 21st 2026'.
+
+    Matches the free-text style already used in the field (uppercase month, an
+    ordinal day, four-digit year) so the prefilled default rarely needs editing."""
+    n = d.day
+    # 11th/12th/13th are the ordinal exceptions; otherwise key off the last digit.
+    suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{d.strftime('%B').upper()} {n}{suffix} {d.year}"
+
 TAB_TITLES = ["SITE", "ZONES", "SPLITTERS", "KEYPADS", "POWER"]
 
 
@@ -517,11 +528,16 @@ class EditorFrame(ctk.CTkFrame):
 
         Phone is intentionally not prefilled from prefs: it's school-specific
         (auto-looked-up per site from the bundled directory), so a prefs value
-        would be a stale number from a previous project."""
+        would be a stale number from a previous project.
+
+        Install date is likewise NOT remembered across projects: unlike the
+        machine-stable tech/IP/gateway, a date carried forward is always stale
+        (it produced yesterday's date on today's job). It defaults to today,
+        formatted the way techs write it, and stays fully editable."""
         from datetime import date as _date
         defaults = {
             "install_tech": prefs.get("install_tech", ""),
-            "install_date": prefs.get("install_date", _date.today().isoformat()),
+            "install_date": _format_install_date(_date.today()),
             "ip_address": prefs.get("ip_address", ""),
             "default_gateway": prefs.get("default_gateway", ""),
         }

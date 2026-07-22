@@ -20,7 +20,6 @@ import json
 import re
 import urllib.request
 from datetime import date
-from functools import lru_cache
 from typing import Optional
 
 # Los Angeles Unified's federal LEA id. The tool only processes LAUSD designs, so
@@ -74,15 +73,31 @@ def _get_json(url: str) -> Optional[dict]:
         return None
 
 
-@lru_cache(maxsize=1)
+# Session cache for the directory. We cache ONLY a successful, non-empty fetch —
+# never a failure. lru_cache would memoize the empty tuple a transient blip
+# returns, so a single early network hiccup would leave the phone blank for
+# every school for the rest of the session even after the network recovered.
+_DIRECTORY_CACHE: Optional[tuple] = None
+
+
+def _reset_directory_cache() -> None:
+    """Clear the cached directory (test hook)."""
+    global _DIRECTORY_CACHE
+    _DIRECTORY_CACHE = None
+
+
 def _fetch_lausd_directory() -> tuple:
     """Fetch the LAUSD school directory once per session.
 
     CCD data lags the calendar by a couple of years (and future years return an
     empty result set), so probe from the current year downward and use the most
     recent year that actually has rows. Returns a tuple of (street, zip, phone,
-    name) so the result is hashable/cacheable; empty on any failure.
+    name); empty on any failure. A successful fetch is memoized for the session;
+    a failure is not, so the next lookup retries rather than staying blank.
     """
+    global _DIRECTORY_CACHE
+    if _DIRECTORY_CACHE is not None:
+        return _DIRECTORY_CACHE
     for year in range(date.today().year, date.today().year - 7, -1):
         data = _get_json(_API.format(year=year))
         if data is None:
@@ -103,7 +118,10 @@ def _fetch_lausd_directory() -> tuple:
                 str(r.get("phone") or ""),
                 str(r.get("school_name") or ""),
             ))
-        return tuple(rows)
+        _DIRECTORY_CACHE = tuple(rows)
+        return _DIRECTORY_CACHE
+    # Every path here is a failure (offline/timeout) or a genuinely empty result.
+    # Return empty WITHOUT caching so a later lookup retries once the network is back.
     return tuple()
 
 
