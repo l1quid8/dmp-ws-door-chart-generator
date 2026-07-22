@@ -1,7 +1,13 @@
 """
-Convert logos/icons/app-icon-dmg.png into app-icon.icns (macOS) and app-icon.ico (Windows).
+Convert logos/icons/app-icon-dmg.png into every derived icon:
+app-icon.icns (macOS bundle), app-icon.ico (Windows .exe), and toolbar-icon.ico
+(the in-window title-bar icon app.py sets on Windows).
 
 Run before pyinstaller. Idempotent — re-running just regenerates from the source PNG.
+
+The source must carry an alpha channel with the rounded-corner mask already
+applied. It is used as-is: nothing here masks corners, so a flattened (fully
+opaque) source silently yields square black icons.
 """
 from __future__ import annotations
 
@@ -17,6 +23,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 SRC = PROJECT_ROOT / "logos" / "icons" / "app-icon-dmg.png"
 ICNS = PROJECT_ROOT / "logos" / "icons" / "app-icon.icns"
 ICO = PROJECT_ROOT / "logos" / "icons" / "app-icon.ico"
+TOOLBAR_ICO = PROJECT_ROOT / "logos" / "icons" / "toolbar-icon.ico"
 
 
 def _square_padded(img: Image.Image) -> Image.Image:
@@ -29,8 +36,8 @@ def _square_padded(img: Image.Image) -> Image.Image:
     return canvas
 
 
-def build_ico(img: Image.Image, out: Path) -> None:
-    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+def build_ico(img: Image.Image, out: Path, max_size: int = 256) -> None:
+    sizes = [(n, n) for n in (16, 24, 32, 48, 64, 128, 256) if n <= max_size]
     img.save(out, format="ICO", sizes=sizes)
     print(f"✓ Wrote {out}")
 
@@ -69,10 +76,16 @@ def main() -> None:
         sys.exit(f"Source icon not found: {SRC}")
     img = Image.open(SRC).convert("RGBA")
     print(f"Loaded {SRC} ({img.width}x{img.height})")
+    if img.getchannel("A").getextrema()[0] == 255:
+        print("  WARNING: source is fully opaque — its rounded corners are not")
+        print("           masked, so the generated icons will be square blocks.")
+        print("           Re-export the source PNG with transparency.")
     img = _square_padded(img)
     if img.width != Image.open(SRC).width:
         print(f"  Padded to {img.width}x{img.height}")
     build_ico(img, ICO)
+    # The title-bar icon renders at ~16-32px, so it needs no size above 128.
+    build_ico(img, TOOLBAR_ICO, max_size=128)
     build_icns(img, ICNS)
 
 
