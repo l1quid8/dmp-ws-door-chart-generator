@@ -399,6 +399,82 @@ def extract_zones(text: str) -> list[ZoneRecord]:
     return out
 
 
+def backfill_missing_expander_points(
+    zones: list[ZoneRecord],
+    installed_rsps: Optional[set[int]] = None,
+) -> tuple[list[ZoneRecord], int]:
+    """Reconstruct SPARE points that OCR dropped from the zone schedule.
+
+    The large-format schedule OCRs unreliably, and SPARE rows — carrying only the
+    word "SPARE" — are the first to vanish (Shirley RSP1 lost Z508-Z514; Toluca
+    lost Z557/Z573). Those points are real: DMP addressing gives expander module N
+    the contiguous block ``zone_block_for(N)``, and the worksheet/door chart must
+    list every physical point. The dropped rows can't be recovered from text, so
+    we rebuild them from the module's point count.
+
+    That count is *derived*, never assumed: the module's last two physical points
+    supervise its paired power supply (``is_ps_ac`` at points-2, ``is_ps_batt`` at
+    points-1), so the battery-trouble zone's offset pins the size — Z516 (offset
+    15) => 16 points; an 8-point module puts BATT at offset 7 and backfill stops
+    there, never inventing points 9-16. If both supervisory rows were also dropped,
+    fall back to rounding the highest surviving offset up to 8 or 16.
+
+    Only backfills modules in ``installed_rsps`` (the RSPs COMBUS LINES actually
+    lists) when given, so stray zones for a phantom RSP number don't spawn spares.
+    Purely additive — existing records are never modified. Returns the new list
+    (sorted by zone number) and the count of records added.
+    """
+    from hardware import zone_block_for, ZONE_BLOCK
+
+    by_rsp: dict[int, list[ZoneRecord]] = {}
+    for z in zones:
+        by_rsp.setdefault(z.rsp, []).append(z)
+
+    added: list[ZoneRecord] = []
+    for rsp_num, recs in by_rsp.items():
+        if installed_rsps is not None and rsp_num not in installed_rsps:
+            continue
+        block = list(zone_block_for(rsp_num))
+        base = block[0]
+
+        # Offsets present within this module's block (ignore any stray out-of-block
+        # zone the parser may have mis-assigned to this RSP).
+        present: set[int] = set()
+        batt_off = ac_off = None
+        for r in recs:
+            off = int(r.zone[1:]) - base
+            if not (0 <= off < ZONE_BLOCK):
+                continue
+            present.add(off)
+            if r.is_ps_batt:
+                batt_off = off
+            elif r.is_ps_ac:
+                ac_off = off
+        if not present:
+            continue
+
+        # Point count from the supervisory zones (BATT is the last physical point);
+        # fall back to rounding the top surviving offset up to 8 or 16.
+        if batt_off is not None:
+            points = batt_off + 1
+        elif ac_off is not None:
+            points = ac_off + 2
+        else:
+            points = 8 if max(present) < 8 else ZONE_BLOCK
+        points = min(points, ZONE_BLOCK)
+
+        for off in range(points):
+            if off not in present:
+                added.append(ZoneRecord(zone=f"Z{base + off}", rsp=rsp_num,
+                                        is_spare=True))
+
+    if not added:
+        return zones, 0
+    merged = zones + added
+    merged.sort(key=lambda r: int(r.zone[1:]))
+    return merged, len(added)
+
+
 def parse_searchable_pdf(pdf_path: str | Path) -> ParsedDesign:
     """Top-level: open the OCR'd PDF and return structured records."""
     pdf_path = Path(pdf_path)

@@ -22,7 +22,8 @@ from openpyxl.utils import get_column_letter
 # Make sibling modules importable
 sys.path.insert(0, str(Path(__file__).parent))
 
-from parse_zone_schedule import parse_searchable_pdf, ZoneRecord, CombusLine
+from parse_zone_schedule import (parse_searchable_pdf, ZoneRecord, CombusLine,
+                                 backfill_missing_expander_points)
 from parse_dmp_worksheet import (
     DMPDesign, SiteInfo, RSP, Keypad, Splitter, PowerSupply, ZoneInfo
 )
@@ -598,17 +599,28 @@ def build_dmp_design_from_pdf(
     # RSPs + zones assignment
     # Build a map of RSP# -> zone count from combus_lines and zone schedule
     # ONLY create RSPs for those explicitly listed in COMBUS LINES
-    rsp_zones: dict[int, list[ZoneRecord]] = {}
-    for zone in parsed.zones:
-        if zone.rsp not in rsp_zones:
-            rsp_zones[zone.rsp] = []
-        rsp_zones[zone.rsp].append(zone)
-
     # Collect RSP numbers from COMBUS LINES
     rsp_combus_map: dict[int, CombusLine] = {}
     for combus_line in parsed.combus_lines:
         if combus_line.kind == "RSP":
             rsp_combus_map[combus_line.n] = combus_line
+
+    # OCR routinely drops SPARE rows from the large-format zone schedule, leaving
+    # holes in an expander's contiguous point block (e.g. Shirley RSP1 lost the
+    # Z508-Z514 spares). Rebuild them deterministically from each installed
+    # module's point count so every physical point lands on the worksheet/door
+    # chart. Scoped to installed RSPs so a stray zone can't spawn a phantom block.
+    parsed.zones, backfilled = backfill_missing_expander_points(
+        parsed.zones, installed_rsps=set(rsp_combus_map.keys()))
+    if backfilled:
+        print(f"  Backfilled {backfilled} dropped spare point(s) across "
+              f"{len(rsp_combus_map)} expander(s)")
+
+    rsp_zones: dict[int, list[ZoneRecord]] = {}
+    for zone in parsed.zones:
+        if zone.rsp not in rsp_zones:
+            rsp_zones[zone.rsp] = []
+        rsp_zones[zone.rsp].append(zone)
 
     for rsp_num in sorted(rsp_combus_map.keys()):
         combus_line = rsp_combus_map[rsp_num]
