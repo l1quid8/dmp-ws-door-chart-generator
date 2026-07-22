@@ -45,6 +45,7 @@ class EditorFrame(ctk.CTkFrame):
 
     def __init__(self, master, root, session: Session, *,
                  on_generate_worksheet=None, on_generate_chart=None,
+                 on_generate_remotelink=None,
                  on_status_change=None, on_validation_change=None):
         super().__init__(master, fg_color="transparent")
         self.root = root
@@ -56,6 +57,7 @@ class EditorFrame(ctk.CTkFrame):
         self._recovery_job: str | None = None
         self._on_generate_worksheet = on_generate_worksheet or (lambda: None)
         self._on_generate_chart = on_generate_chart or (lambda: None)
+        self._on_generate_remotelink = on_generate_remotelink or (lambda: None)
         self.on_status_change = on_status_change or (lambda text, dirty: None)
         self.on_validation_change = on_validation_change or (lambda text, ok: None)
         self._site_vars: dict[str, ctk.StringVar] = {}
@@ -210,21 +212,29 @@ class EditorFrame(ctk.CTkFrame):
             fg_color="transparent", border_width=1, border_color=ACCENT,
             text_color=ACCENT, hover_color=("gray90", "gray25"),
             command=self._on_generate_chart)
-        self._gen_chart_btn.pack(side="left")
+        self._gen_chart_btn.pack(side="left", padx=(0, 8))
+        self._gen_rl_btn = ctk.CTkButton(
+            gen_row, text="Generate RemoteLink Account", height=30, width=200,
+            fg_color="transparent", border_width=1, border_color=ACCENT,
+            text_color=ACCENT, hover_color=("gray90", "gray25"),
+            command=self._on_generate_remotelink)
+        self._gen_rl_btn.pack(side="left")
         self._update_save_button()
 
     def set_generating(self, which: str | None):
         """Reflect a running generation on the buttons: `which` is
-        'worksheet', 'chart', or None when idle. Both disable while one runs
-        (they share the design and the output pipeline)."""
-        ws_running = which == "worksheet"
-        chart_running = which == "chart"
+        'worksheet', 'chart', 'remotelink', or None when idle. All disable while
+        one runs (they share the design and the output pipeline)."""
         running = which is not None
         self._gen_ws_btn.configure(
-            text="Generating…" if ws_running else "Generate Worksheet",
+            text="Generating…" if which == "worksheet" else "Generate Worksheet",
             state="disabled" if running else "normal")
         self._gen_chart_btn.configure(
-            text="Generating…" if chart_running else "Generate Door Chart",
+            text="Generating…" if which == "chart" else "Generate Door Chart",
+            state="disabled" if running else "normal")
+        self._gen_rl_btn.configure(
+            text="Generating…" if which == "remotelink"
+                 else "Generate RemoteLink Account",
             state="disabled" if running else "normal")
 
     def _on_zones_edit(self):

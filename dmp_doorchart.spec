@@ -102,6 +102,7 @@ a = Analysis(
     datas=[
         ("DMP Installation Worksheet_template_blank.xlsx", "."),
         ("door_chart_template_blank.xlsx", "."),
+        ("remotelink_account_template.xml", "."),
         ("VERSION", "."),
         ("logos", "logos"),
         (CTK_DIR, "customtkinter"),
@@ -116,6 +117,8 @@ a = Analysis(
         "openpyxl.cell._writer",
         "fitz",
         "pymupdf",
+        "Crypto",
+        "Crypto.Cipher.AES",
     ] + ocrmypdf_modules + pdfminer_modules,
     hookspath=[],
     hooksconfig={},

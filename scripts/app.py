@@ -43,6 +43,7 @@ from session import (
     unique_session_path,
 )
 from editor_frame import EditorFrame
+from rl_injector.xml_export import generate_account_xml
 import updater
 
 DOOR_CHART_TEMPLATE = resource_path("door_chart_template_blank.xlsx")
@@ -1048,6 +1049,7 @@ class App:
             self.editor_section, self.root, session,
             on_generate_worksheet=self._generate_worksheet,
             on_generate_chart=self._generate_door_chart,
+            on_generate_remotelink=self._generate_remotelink,
             on_status_change=self._on_editor_status,
             on_validation_change=self._on_editor_validation,
         )
@@ -1263,6 +1265,117 @@ class App:
         def on_error(exc):
             self._set_generating(None)
             messagebox.showerror("Door chart generation failed", str(exc))
+
+        self._run_async(work, on_done, on_error)
+
+    # ------------------------------------------------------------------ #
+    # RemoteLink account                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _generate_remotelink(self):
+        """Generate an encrypted RemoteLink `.xml` account from the design.
+
+        Portable (any OS) — the operator imports the `.xml` into RemoteLink."""
+        if self.state != "editing" or not self.session or not self.editor \
+                or self._generating is not None:
+            return
+        if self.editor.dirty and messagebox.askyesno(
+            "Save project?", "Save the project before generating?",
+        ):
+            self.editor.save()
+        self._show_remotelink_dialog()
+
+    def _show_remotelink_dialog(self):
+        """Prompt for the account number, receiver number, and export passphrase.
+
+        Account prefills from the school code (LOC CODE). The account is stamped
+        from a bundled demo template (no real data), so there's nothing to pick —
+        just choose a passphrase, which you'll re-type when importing."""
+        design = self.session.design
+        default_account = (design.site_info.school_code or "").strip()
+
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("Generate RemoteLink Account")
+        dlg.geometry("520x240")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="Generate RemoteLink Account",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(
+            anchor="w", padx=20, pady=(18, 2))
+        ctk.CTkLabel(
+            dlg, text="Builds an encrypted .xml you import into RemoteLink.",
+            text_color=("gray40", "gray70")).pack(anchor="w", padx=20, pady=(0, 10))
+
+        form = ctk.CTkFrame(dlg, fg_color="transparent")
+        form.pack(fill="x", padx=20)
+        form.columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(form, text="Account number").grid(
+            row=0, column=0, sticky="w", pady=6)
+        acct_var = ctk.StringVar(value=default_account)
+        ctk.CTkEntry(form, textvariable=acct_var).grid(
+            row=0, column=1, sticky="ew", pady=6)
+
+        ctk.CTkLabel(form, text="Passphrase").grid(row=1, column=0, sticky="w", pady=6)
+        pass_var = ctk.StringVar(value="")
+        ctk.CTkEntry(form, textvariable=pass_var, show="•").grid(
+            row=1, column=1, sticky="ew", pady=6)
+
+        btns = ctk.CTkFrame(dlg, fg_color="transparent")
+        btns.pack(fill="x", padx=20, pady=16)
+        ctk.CTkButton(btns, text="Cancel", width=90, fg_color="transparent",
+                      border_width=1, text_color=("gray30", "gray80"),
+                      command=dlg.destroy).pack(side="left")
+
+        def submit():
+            account_num = acct_var.get().strip()
+            passphrase = pass_var.get()
+            if not account_num.isdigit():
+                messagebox.showerror(
+                    "Invalid account number",
+                    "The account number must be numeric (the school LOC CODE, "
+                    "e.g. 2250) — it becomes the panel user code.", parent=dlg)
+                return
+            if not passphrase:
+                messagebox.showerror(
+                    "Passphrase needed",
+                    "Enter the export passphrase — you'll type the same one when "
+                    "importing into RemoteLink.", parent=dlg)
+                return
+            dlg.destroy()
+            self._run_generate_remotelink(account_num, passphrase)
+
+        ctk.CTkButton(btns, text="Generate", width=120, fg_color=ACCENT,
+                      hover_color=ACCENT_HOVER, command=submit).pack(side="right")
+
+    def _run_generate_remotelink(self, account_num, passphrase):
+        design = self.session.design
+        sync_master_zones(design)
+        out_dir = self.output_dir
+        template_path = resource_path("remotelink_account_template.xml")
+        self._set_generating("remotelink")
+
+        def work():
+            out_dir.mkdir(parents=True, exist_ok=True)
+            with contextlib.redirect_stdout(self._redirector), \
+                 contextlib.redirect_stderr(self._redirector):
+                return generate_account_xml(
+                    design, account_num,
+                    template_path=template_path, passphrase=passphrase,
+                    out_dir=out_dir)
+
+        def on_done(path):
+            self._set_generating(None)
+            # A generated account still needs its per-site comm / IP / panel
+            # settings entered in Remote Link. Generating ≠ commissioning.
+            self._show_toast(f"RemoteLink .xml for {account_num} ready — "
+                             "import it into RemoteLink",
+                             action=("Open", lambda: open_file(path)))
+
+        def on_error(exc):
+            self._set_generating(None)
+            messagebox.showerror("RemoteLink account generation failed", str(exc))
 
         self._run_async(work, on_done, on_error)
 

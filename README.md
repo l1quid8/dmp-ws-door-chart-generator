@@ -60,12 +60,27 @@ generated from it and are never re-imported.
 
 ### 3. Generate
 
-Two buttons at the bottom of the editor (also Worksheet menu / keyboard):
+Buttons at the bottom of the editor (also Worksheet menu / keyboard):
 
 - **Generate Worksheet** (`Cmd/Ctrl+E`) — writes the next worksheet revision.
 - **Generate Door Chart** (`Cmd/Ctrl+D`) — builds the chart from the newest
   worksheet, warning if the design has changed since that worksheet was
   generated.
+- **Generate RemoteLink Account** — builds an encrypted RemoteLink `.xml` account
+  export for the design (author on any OS). Prompts only for the account number
+  (prefilled from the School Code / LOC CODE), receiver number, and the export
+  **passphrase** (you type the same one when importing). Produces
+  `<code>_remotelink.xml`, which you **import** into RemoteLink on the Windows box
+  — no ODBC driver or direct database access needed.
+
+> **A generated account is not a commissioned panel.** It carries the correct
+> zones and keypads, but still needs its per-site comm / IP / panel settings (and
+> the panel arming user code) entered in Remote Link afterward.
+>
+> The account is stamped from a bundled **demo** template
+> (`remotelink_account_template.xml`) that contains no real data — nothing to
+> supply. The `.xml` scheme is documented in the injector repo's
+> `tools/XML_FORMAT.md`.
 
 If validation issues are open you get a summary with "Go to" jumps — generate
 anyway, or fix things first; your call.
@@ -90,6 +105,7 @@ plus hover tooltips on the less obvious controls.
 | Path | Purpose |
 |---|---|
 | `scripts/` | All Python source (one cross-platform copy) |
+| `scripts/rl_injector/` | RemoteLink account encoder — staging model + encrypted `.xml` export |
 | `dmp_doorchart.spec` | PyInstaller build spec (OS-branched internally) |
 | `requirements.txt` | Pinned dependencies — build with **Python 3.13** |
 | `VERSION` | App version, shown in the title bar |
