@@ -1,4 +1,4 @@
-# DMP WS & Door Chart Generator
+# C1 DMP Toolkit
 
 Desktop app (macOS + Windows) that turns a security-system design PDF into two
 Excel deliverables: a **DMP Installation Worksheet** and a **Door Chart** —
@@ -176,7 +176,7 @@ libraries, and the OCR tools (Tesseract + Ghostscript). The recipient needs
 nothing installed. It ships as a `.zip` (one folder holding the `.exe` plus an
 `_internal/` folder of bundled files).
 
-To share: download `DMP-WS-Door-Chart-Generator-Windows.zip` from the GitHub
+To share: download `C1-DMP-Toolkit-Windows.zip` from the GitHub
 Release and send it over **Teams** (email servers block executables). They:
 
 1. Save the `.zip` and **extract it** (right-click → Extract All). Keep the
@@ -195,7 +195,7 @@ antivirus on managed/corporate Windows machines.
 
 Generated worksheets and door charts are written to a folder the user picks
 in-app (**"Save output to → Change…"**), stored per machine. The default is
-`~/Documents/DMP WS & Door Chart Generator/`. Each generate writes the next
+`~/Documents/C1 DMP Toolkit/`. Each generate writes the next
 `_revN` file rather than overwriting, so earlier revisions stay available for
 comparison. Point the folder at OneDrive to sync deliverables across machines,
 or keep it local.

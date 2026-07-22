@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the macOS .app for "DMP WS & Door Chart Generator".
+# Build the macOS .app for "C1 DMP Toolkit".
 # Double-click this file in Finder, or run it from a terminal.
 # No prior setup needed beyond Python 3.13 + Homebrew OCR tools.
 set -euo pipefail
@@ -9,7 +9,7 @@ cd "$PROJECT_DIR"
 
 BUILD_HOME="$HOME/.dmp-doorchart"
 VENV="$BUILD_HOME/venv"
-APP_NAME="DMP WS & Door Chart Generator"
+APP_NAME="C1 DMP Toolkit"
 
 echo "==> Project:    $PROJECT_DIR"
 echo "==> Build home: $BUILD_HOME  (local, never synced)"

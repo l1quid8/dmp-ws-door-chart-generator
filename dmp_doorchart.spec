@@ -6,7 +6,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
-APP_NAME = "DMP WS & Door Chart Generator"
+APP_NAME = "C1 DMP Toolkit"
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform == "win32"
 

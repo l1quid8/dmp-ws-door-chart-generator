@@ -43,12 +43,12 @@ jobs:
       - name: Zip .app
         run: |
           cd dist
-          ditto -c -k --keepParent "DMP WS & Door Chart Generator.app" \
-            "DMP-WS-Door-Chart-Generator-macOS.zip"
+          ditto -c -k --keepParent "C1 DMP Toolkit.app" \
+            "C1-DMP-Toolkit-macOS.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/DMP-WS-Door-Chart-Generator-macOS.zip
+          path: dist/C1-DMP-Toolkit-macOS.zip
           # Temporary hand-off to the release job — published Release assets
           # are stored separately and don't count against Actions storage.
           retention-days: 1
@@ -72,12 +72,12 @@ jobs:
       - name: Zip the app folder
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/DMP WS & Door Chart Generator" `
-            -DestinationPath "dist/DMP-WS-Door-Chart-Generator-Windows.zip"
+          Compress-Archive -Path "dist/C1 DMP Toolkit" `
+            -DestinationPath "dist/C1-DMP-Toolkit-Windows.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist/DMP-WS-Door-Chart-Generator-Windows.zip
+          path: dist/C1-DMP-Toolkit-Windows.zip
           retention-days: 1
 
   release:

@@ -4,8 +4,8 @@ Self-update support for the packaged app.
 The release pipeline (.github/workflows/release.yml) publishes a GitHub Release on
 every ``v*`` tag with stable, per-platform asset names:
 
-    DMP-WS-Door-Chart-Generator-macOS.zip     (a .app, zipped with --keepParent)
-    DMP-WS-Door-Chart-Generator-Windows.zip   (the one-folder app at top level)
+    C1-DMP-Toolkit-macOS.zip     (a .app, zipped with --keepParent)
+    C1-DMP-Toolkit-Windows.zip   (the one-folder app at top level)
 
 This module checks the public GitHub Releases API, compares the latest release tag
 against the bundled VERSION, and — when newer — downloads the matching asset and
@@ -32,7 +32,7 @@ from pathlib import Path
 
 from paths import resource_path
 
-REPO = "l1quid8/dmp-ws-door-chart-generator"
+REPO = "l1quid8/c1-dmp-toolkit"
 _API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 _RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 _UA = "DMP-DoorChart-Updater"

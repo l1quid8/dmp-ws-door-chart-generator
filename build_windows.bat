@@ -1,5 +1,5 @@
 @echo off
-REM Build the Windows .exe for "DMP WS & Door Chart Generator".
+REM Build the Windows .exe for "C1 DMP Toolkit".
 REM Double-click this file in Explorer. No prior setup needed beyond
 REM Python 3.13 + Tesseract-OCR + Ghostscript.
 setlocal enabledelayedexpansion
@@ -10,7 +10,7 @@ set "BUILD_HOME=%USERPROFILE%\.dmp-doorchart"
 set "VENV=%BUILD_HOME%\venv"
 REM Inside set "..." quotes the & is literal, so no ^ escape is needed (and a
 REM ^ would become part of the value). Every use of %APP_NAME% below is quoted.
-set "APP_NAME=DMP WS & Door Chart Generator"
+set "APP_NAME=C1 DMP Toolkit"
 
 echo ==^> Project:    %CD%
 echo ==^> Build home: %BUILD_HOME%  (local, never synced)

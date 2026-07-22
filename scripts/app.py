@@ -17,7 +17,7 @@ from tkinterdnd2 import TkinterDnD, DND_FILES
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from paths import resource_path, output_dir, next_rev_path, latest_rev_path
+from paths import APP_NAME, resource_path, output_dir, next_rev_path, latest_rev_path
 from generate_dmp_ws import (
     build_dmp_design_from_pdf,
     write_dmp_xlsx,
@@ -158,7 +158,7 @@ class App:
     def __init__(self):
         self.root = CTkDnD()
         _version = _app_version()
-        self.root.title("DMP WS & Door Chart Generator" + (f"  v{_version}" if _version else ""))
+        self.root.title(APP_NAME + (f"  v{_version}" if _version else ""))
         self.root.geometry("1000x680")
         self.root.minsize(860, 560)
         self.root.resizable(True, True)

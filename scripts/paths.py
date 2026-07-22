@@ -3,7 +3,12 @@ import re
 import sys
 from pathlib import Path
 
-APP_NAME = "DMP WS & Door Chart Generator"
+APP_NAME = "C1 DMP Toolkit"
+
+# The pre-rename name. Its ~/Documents folder holds real deliverables on machines
+# that used the default output location, so keep honouring it rather than silently
+# starting a fresh empty folder next to it.
+_LEGACY_APP_NAME = "DMP WS & Door Chart Generator"
 
 # Generated artifacts are revision-numbered ({base}_rev3.xlsx): each generate
 # keeps prior revisions so a superintendent's mark-ups on rev N stay
@@ -48,7 +53,19 @@ def resource_path(rel: str) -> Path:
 
 
 def _default_output_dir() -> Path:
-    return Path.home() / "Documents" / APP_NAME
+    """Default output folder, preferring an existing pre-rename folder.
+
+    The app was renamed from "DMP WS & Door Chart Generator" to "C1 DMP Toolkit".
+    A machine that used the default location has prior revisions under the old
+    name; switching outright would leave them behind with no indication why. Only
+    fall back to the legacy folder if it already exists and the new one doesn't.
+    """
+    new = Path.home() / "Documents" / APP_NAME
+    if not new.exists():
+        legacy = Path.home() / "Documents" / _LEGACY_APP_NAME
+        if legacy.is_dir():
+            return legacy
+    return new
 
 
 def output_dir() -> Path:
