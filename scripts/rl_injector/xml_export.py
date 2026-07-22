@@ -67,8 +67,16 @@ def encode_account(xml_text: str, passphrase: str) -> str:
 # --------------------------------------------------------------- xml render ---
 
 def _b64(text: str) -> str:
-    """Encode a DataType=1 string value: Base64(text + trailing NUL)."""
-    return base64.b64encode(text.encode("latin-1") + b"\x00").decode("ascii")
+    """Encode a DataType=1 string value the way RemoteLink does.
+
+    DMP NUL-pads the text to a multiple of 3 bytes so the base64 carries NO '='
+    padding (real exports use '=' in none of their string fields). RemoteLink's
+    importer mis-decodes '='-padded values into garbage characters, which showed
+    up as trailing junk on zone names whose length was ≡1 mod 3.
+    """
+    raw = text.encode("latin-1")
+    raw += b"\x00" * ((3 - len(raw) % 3) % 3)
+    return base64.b64encode(raw).decode("ascii")
 
 
 def _unb64(value: str) -> str:
@@ -120,6 +128,32 @@ def build_account_xml(acct, template_xml: str, *, sentinel: Optional[int] = None
                      ("PHONE", acct.phone)):
         if val:
             xml = _set(xml, tag, _b64(val), count=1)
+
+    # Area name = the school/account name (matches real exports). Every AreaInfo
+    # block's NAME is set; other area settings (exit delay, etc.) come from the
+    # template's dealer-standard defaults.
+    xml = re.sub(
+        r"<AreaInfo>.*?</AreaInfo>",
+        lambda m: re.sub(r"(<NAME\b[^>]*>).*?(</NAME>)",
+                         lambda n: n.group(1) + _b64(acct.name) + n.group(2),
+                         m.group(0), count=1, flags=re.S),
+        xml, flags=re.S)
+
+    # User-code defaults: USER (#1) = the site code, TECHNICIAN (#9999) =
+    # "1" + the site code. Other users (if any) keep the template's codes.
+    def _set_user_code(m):
+        blk = m.group(0)
+        num = re.search(r'<USER_NUM DataType="3">(\d+)</USER_NUM>', blk)
+        if not num:
+            return blk
+        code = {"1": acct.account_num,
+                "9999": "1" + acct.account_num}.get(num.group(1))
+        if code is None:
+            return blk
+        return re.sub(r"(<CODE\b[^>]*>).*?(</CODE>)",
+                      lambda c: c.group(1) + _b64(code) + c.group(2),
+                      blk, count=1, flags=re.S)
+    xml = re.sub(r"<Users>.*?</Users>", _set_user_code, xml, flags=re.S)
 
     # Zones: clone a prototype block per DMP zone TYPE so type-specific
     # programming fields (AREA_LIST, action messages, SWGR_BYPS) come along.

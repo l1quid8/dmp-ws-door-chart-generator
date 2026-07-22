@@ -209,8 +209,19 @@ def test_bundled_template_present_and_scrubbed():
     # survive.
     import base64
     import re
-    real = ("SHIRLEY", "LAUSD", "RESEDA", "TELCO", "PRINCIPAL", "TEACHERS",
-            "0020BEFF", "000B9428887A", "D8D4X0VG", "10.69.69.69", "6712")
+    # LAUSD (the district) is an intentional dealer-standard Customer value, not
+    # per-account identity — it's allowed. These are the source account's private
+    # identifiers, which must not survive the scrub into the public repo.
+    real = ("DARBY", "NORTHRIDGE", "10818", "360-1824", "0020D16D",
+            "000B94289066", "D8D4X0VG", "FACP", "PRINCIPAL", "TEXTBOOK")
+    # No private (10.x) IP may survive either.
+    for m in re.finditer(r'DataType="1"[^>]*>([A-Za-z0-9+/=]*)<', xml):
+        try:
+            dec = base64.b64decode(m.group(1)).decode("latin-1").rstrip("\x00")
+        except Exception:
+            continue
+        assert not re.fullmatch(r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}", dec), \
+            f"private IP leaked in template: {dec}"
     for m in re.finditer(r'DataType="1"[^>]*>([A-Za-z0-9+/=]*)<', xml):
         try:
             dec = base64.b64decode(m.group(1)).decode("latin-1")
@@ -226,3 +237,52 @@ def test_generate_account_xml_with_bundled_template(tmp_path):
     s = summary_via_decode(decode_account(out.read_text(), "secret"))
     assert s["account_num"] == "2250" and s["id"] == "92250"
     assert s["zone_count"] == 7 and s["keypads"] == 2
+
+
+def _padded_dt1_fields(xml: str) -> list:
+    import re
+    return [v for v in re.findall(r'DataType="1"[^>]*>([A-Za-z0-9+/=]*)<', xml)
+            if "=" in v]
+
+
+def test_user_codes_default_from_account(tmp_path):
+    import base64
+    import re
+    out = generate_account_xml(_rl_design(), "2250", template_path=BUNDLED_TEMPLATE,
+                               passphrase="p", out_dir=tmp_path)
+    xml = decode_account(out.read_text(), "p")
+    codes = {}
+    for m in re.finditer(r"<Users>.*?</Users>", xml, re.S):
+        num = re.search(r'<USER_NUM DataType="3">(\d+)</USER_NUM>', m.group(0)).group(1)
+        code = re.search(r'<CODE DataType="1">([^<]*)</CODE>', m.group(0)).group(1)
+        codes[num] = base64.b64decode(code).decode("latin-1").rstrip("\x00")
+    assert codes.get("1") == "2250"       # USER = site code
+    assert codes.get("9999") == "12250"   # TECHNICIAN = 1 + site code
+
+
+def test_area_schedule_default(tmp_path):
+    import re
+    out = generate_account_xml(_rl_design(), "2250", template_path=BUNDLED_TEMPLATE,
+                               passphrase="p", out_dir=tmp_path)
+    xml = decode_account(out.read_text(), "p")
+    a1 = re.search(r"<AreaTimeScheds>.*?<NUMBER DataType=\"3\">1</NUMBER>.*?</AreaTimeScheds>",
+                   xml, re.S).group(0)
+    assert '<SCHED_1 DataType="3">1</SCHED_1>' in a1   # area 1 uses schedule 1
+
+
+def test_no_base64_padding_in_bundled_template():
+    # Real DMP exports use '=' padding in zero string fields; RemoteLink
+    # mis-decodes any '='-padded value into junk characters.
+    xml = BUNDLED_TEMPLATE.read_text(encoding="latin-1")
+    assert _padded_dt1_fields(xml) == []
+
+
+def test_no_base64_padding_in_generated_account():
+    # Regression: names whose length was ≡1 mod 3 previously produced '=='-padded
+    # base64 and rendered as garbage (e.g. "TEXTBOOK ROOM #2▯@") on import.
+    d = _rl_design()
+    d.master_zones.append(Zone(number=506, description="TEXTBOOK ROOM #2"))  # len ≡1 mod 3 case
+    d.rsps[0].zones.append(506)
+    xml = build_account_xml(build_staging_account(d, "2250", receiver_num=""),
+                            BUNDLED_TEMPLATE.read_text(encoding="latin-1"))
+    assert _padded_dt1_fields(xml) == []
