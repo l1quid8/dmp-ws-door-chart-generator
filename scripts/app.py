@@ -1715,25 +1715,31 @@ class App:
         btns = ctk.CTkFrame(dlg, fg_color="transparent")
         btns.pack(fill="x", padx=20, pady=16)
 
-        def later():
+        def skip():
+            # Silence the *automatic* prompt for this release only. The Help-menu
+            # "Check for Updates…" ignores skip_version, so a manual update still works.
             prefs = load_prefs()
             prefs["skip_version"] = info["tag"]
             save_prefs(prefs)
             self._close_update_dialog()
 
-        secondary_button(btns, "Later", later, width=90).pack(side="left")
+        # "Later" just closes — the once-a-day launch check re-prompts on the next
+        # run. Only "Skip this version" suppresses this release for good.
+        ghost_button(btns, "Skip this version", skip, width=130).pack(side="left")
+        secondary_button(btns, "Later", self._close_update_dialog,
+                         width=80).pack(side="left", padx=(8, 0))
 
         if updater.can_self_update() and info["asset_url"]:
             primary_button(btns, "Update Now",
                            lambda: self._start_update(info, dlg, btns),
-                           width=130).pack(side="right")
+                           width=120).pack(side="right")
         else:
             # Dev run or missing asset — fall back to the download page.
             primary_button(
                 btns, "Open Download Page",
                 lambda: (webbrowser.open(info["html_url"]),
                          self._close_update_dialog()),
-                width=170).pack(side="right")
+                width=160).pack(side="right")
 
     def _close_update_dialog(self):
         if self._update_dialog is not None and self._update_dialog.winfo_exists():
