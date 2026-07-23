@@ -255,6 +255,72 @@ def _consolidate_lx(xml: str, filled_rows: list[int]) -> str:
     return xml
 
 
+# -------- header title-block reference repair --------
+#
+# Every presentation sheet stamps a three-line title on each chart block:
+#   =Header!B3 (school name), =Header!B4 (address), =Header!B5 (city/state/zip).
+# The Header sheet only holds B3:B5, but the template was built by copy-pasting
+# the title block down each sheet with RELATIVE references, so every block below
+# the third points past B5 into empty cells (=Header!B39, B75, B111, ... on
+# LX-KP-710s; B99..B101 on Power Supplies; two stray cells on Terminal Cans),
+# and Excel renders those as a blank (cached '0') title. This was invisible while
+# jobs filled at most three blocks; the splitter-overflow fix now fills five on
+# large jobs, exposing it. The bad refs always sit in clean runs of three
+# consecutive rows within one column, so we reassign each run to B3/B4/B5 by
+# position — independent of how far it drifted — and touch only cells that change.
+
+_HEADER_REF_RE = re.compile(
+    r'<c r="([A-Z]+)(\d+)"([^>]*)>'   # 1=col 2=row 3=attrs (incl. style)
+    r'<f>Header!B(\d+)</f>'           # 4=current target row
+    r'(?:<v>.*?</v>)?'
+    r'</c>')
+
+
+def _normalize_header_refs(xml: str) -> str:
+    """Repair drifted =Header! title references on a presentation sheet."""
+    cells = []
+    for m in _HEADER_REF_RE.finditer(xml):
+        col, row, attrs, cur = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
+        style = re.search(r's="\d+"', attrs)
+        cells.append((col, row, m.start(), m.end(), style.group(0) if style else "", cur))
+    if not cells:
+        return xml
+
+    by_col: dict[str, list] = {}
+    for c in cells:
+        by_col.setdefault(c[0], []).append(c)
+
+    edits: list[tuple[int, int, str]] = []
+    for col, items in by_col.items():
+        items.sort(key=lambda c: c[1])
+        run: list = [items[0]]
+        for it in items[1:] + [None]:
+            if it is not None and it[1] == run[-1][1] + 1:
+                run.append(it)
+                continue
+            # A title block is exactly three rows (name / address / city). A run of
+            # any other length means the template layout moved — fail loudly rather
+            # than silently mis-map.
+            assert len(run) == 3, (
+                f"header title block on column {col} rows "
+                f"{[r[1] for r in run]} is not 3 rows — template layout changed")
+            for pos, (c_col, c_row, start, end, style, cur) in enumerate(run):
+                target = 3 + pos                     # B3, B4, B5
+                if cur != target:
+                    sattr = f" {style}" if style else ""
+                    # Drop the stale cached <v> (a bad ref cached '0'); calcChain is
+                    # removed and fullCalcOnLoad set, so Excel recomputes on open.
+                    edits.append((start, end,
+                                  f'<c r="{c_col}{c_row}"{sattr}>'
+                                  f'<f>Header!B{target}</f></c>'))
+            if it is not None:
+                run = [it]
+
+    for start, end, repl in sorted(edits, key=lambda e: e[0], reverse=True):
+        xml = xml[:start] + repl + xml[end:]
+    return xml
+
+
 # -------- consolidation: truncate empty placeholder blocks --------
 #
 # Each presentation sheet carries 15 pre-drawn block groups (two charts per group,
@@ -655,11 +721,13 @@ def inject(template_path: Path, dmp_design: DMPDesign, output_path: Path) -> Non
     # its real rows, 8-port blocks are reshaped (8 rows → AUX → blanks), and unused module
     # blocks are blanked. In-place XML edits keep each sheet's <tablePart>/<drawing> intact.
     #   sheet3 = Terminal Cans, sheet4 = RSPs, sheet5 = Power Supplies, sheet6 = LX-KP-710s
+    # Each presentation sheet is retargeted/consolidated, then its drifted
+    # =Header! title references are repaired (see _normalize_header_refs).
     PRESENTATION_REWRITERS = {
-        "xl/worksheets/sheet3.xml": lambda x: _retarget_zone_tab(x, "tc", dmp_design),
-        "xl/worksheets/sheet4.xml": lambda x: _retarget_zone_tab(x, "rsps", dmp_design),
-        "xl/worksheets/sheet5.xml": lambda x: _retarget_power_supplies(x, dmp_design),
-        "xl/worksheets/sheet6.xml": lambda x: _consolidate_lx(x, lx_filled_rows),
+        "xl/worksheets/sheet3.xml": lambda x: _normalize_header_refs(_retarget_zone_tab(x, "tc", dmp_design)),
+        "xl/worksheets/sheet4.xml": lambda x: _normalize_header_refs(_retarget_zone_tab(x, "rsps", dmp_design)),
+        "xl/worksheets/sheet5.xml": lambda x: _normalize_header_refs(_retarget_power_supplies(x, dmp_design)),
+        "xl/worksheets/sheet6.xml": lambda x: _normalize_header_refs(_consolidate_lx(x, lx_filled_rows)),
     }
 
     # Consolidation drop plan: read the template's sheet rels to find each sheet's
