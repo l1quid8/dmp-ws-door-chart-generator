@@ -103,14 +103,18 @@ def test_no_formulas_or_headers_below_cutoff(tmp_path):
 # -------- LX-KP-710s compaction --------
 
 def test_lx_compaction_pairs_scattered_splitters(tmp_path):
-    """LX500-1 (Master row 29) + KP-1 (row 54) sit ~20 slots apart in the template;
-    the output pairs them side by side in group 1 (the hand-finished layout)."""
+    """LX500-1 and KP-1 are paired side by side in group 1 (the hand-finished layout).
+
+    Master packs splitters contiguously from row 29 in display order, so KP-1 backs
+    row 30 — see tests/test_splitter_overflow.py for why it is no longer row 54."""
     out = _inject(tmp_path, _splitter_design(_lx(1), _kp(1)))
-    lx = openpyxl.load_workbook(out)["LX-KP-710s"]
+    wb = openpyxl.load_workbook(out)
+    lx, m = wb["LX-KP-710s"], wb["Master"]
+    assert (m["A29"].value, m["A30"].value) == ("710-LX500-1", "710-KP-1")
     assert lx["B7"].value == "=Master!C29"
-    assert lx["E7"].value == "=Master!C54"
+    assert lx["E7"].value == "=Master!C30"
     assert [lx[f"F{r}"].value for r in range(9, 13)] == \
-        ["=Master!D54", "=Master!E54", "=Master!F54", "=Master!G54"]
+        ["=Master!D30", "=Master!E30", "=Master!F30", "=Master!G30"]
     assert lx.max_row == 12
 
 
@@ -129,7 +133,7 @@ def test_lx_three_splitters_spill_to_group_two(tmp_path):
     lx = openpyxl.load_workbook(out)["LX-KP-710s"]
     assert lx["B7"].value == "=Master!C29"
     assert lx["E7"].value == "=Master!C30"
-    assert lx["B19"].value == "=Master!C54"            # 3rd chart: group 2 left slot
+    assert lx["B19"].value == "=Master!C31"            # 3rd chart: group 2 left slot
     assert lx["E19"].value is None
     assert lx.max_row == 24
 

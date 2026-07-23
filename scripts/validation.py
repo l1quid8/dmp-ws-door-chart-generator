@@ -192,10 +192,26 @@ def errors(issues: list[Issue]) -> list[Issue]:
 
 
 def badge_counts(issues: list[Issue]) -> dict[str, int]:
-    """Error count per tab, for the editor's tab badges."""
+    """Error count per tab, for the editor's status-bar summary."""
     counts: dict[str, int] = {}
     for issue in errors(issues):
         counts[issue.tab] = counts.get(issue.tab, 0) + 1
+    return counts
+
+
+def badge_counts_by_severity(issues: list[Issue]) -> dict[str, dict[str, int]]:
+    """{tab: {"error": n, "warning": m}} — drives the tab-bar badges.
+
+    The tab strip distinguishes the two severities (an error count pill vs. a
+    warning glyph), which the error-only badge_counts() can't express. Tabs
+    with nothing to report are omitted.
+    """
+    counts: dict[str, dict[str, int]] = {}
+    for issue in issues:
+        if issue.severity not in ("error", "warning"):
+            continue
+        bucket = counts.setdefault(issue.tab, {"error": 0, "warning": 0})
+        bucket[issue.severity] += 1
     return counts
 
 

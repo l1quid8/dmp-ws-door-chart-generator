@@ -19,7 +19,8 @@ Master sheet write surface (everything else inherits via formulas):
     B11..B15 = LX500..LX900 bus terminals (location of first splitter on each bus)
 
   710 BUS SPLITTER/REPEATER TOPOLOGY sub-table (rows 29-63, cols A-G):
-    Rows 29-63 with pre-seeded slot IDs in col A (e.g. '710-LX500-1', '710-KP-1')
+    Col A = splitter ID, written top-down in display order (LX by bus then number,
+      then KP). The template ships placeholder slot IDs here; they are overwritten.
     Cols B-G = LOCATION, SECTION TITLE, COMBUS INPUT, OUTPUT 1, OUTPUT 2, OUTPUT 3
 
   Zone area (rows 67-562, cols B/C/D):
@@ -392,14 +393,29 @@ def format_section_title(s: Splitter) -> str:
 # -------- XR-550 CONFIG and SPLITTER TOPOLOGY population --------
 
 
-def _build_slot_to_splitter_map(dmp_design: DMPDesign) -> dict[str, Splitter]:
-    """Map template slot IDs to DMP splitters by direct ID equality.
+# Master's topology sub-table, and the number of charts the LX-KP-710s tab can
+# draw (15 pre-drawn block groups, two charts each).
+_TOPOLOGY_ROWS = range(29, 64)
+_MAX_TOPOLOGY_CHARTS = _N_GROUPS * 2
 
-    Both the door chart template's column-A slot IDs and the DMP's splitter
-    IDs follow the IA-diagram convention ('710-LX500-N', '710-KP-N'), so
-    the mapping is now trivial — no bus-resolution walk needed.
+_LX_ID_RE = re.compile(r"^710-LX(\d{3})-(\d+)$")
+_KP_ID_RE = re.compile(r"^710-KP-(\d+)$")
+
+
+def _splitter_sort_key(s: Splitter) -> tuple:
+    """Display order: LX splitters by bus then number, then KP by number.
+
+    Mirrors the reading order of the template's placeholder slot IDs, so jobs that
+    fit the old per-bus layout produce a byte-identical topology table.
     """
-    return {s.id: s for s in dmp_design.splitters}
+    sid = (s.id or "").strip()
+    if s.splitter_type == "KP":
+        m = _KP_ID_RE.match(sid)
+        return (1, 0, int(m.group(1)) if m else 10**6, sid)
+    if s.splitter_type == "LX":
+        m = _LX_ID_RE.match(sid)
+        return (0, int(m.group(1)), int(m.group(2)), sid) if m else (0, 10**6, 10**6, sid)
+    return (2, 0, 0, sid)
 
 
 def _populate_xr550_config(master, dmp_design: DMPDesign) -> int:
@@ -458,29 +474,37 @@ def _populate_xr550_config(master, dmp_design: DMPDesign) -> int:
 def _populate_splitter_topology(master, dmp_design: DMPDesign) -> tuple[list[int], int]:
     """Populate Master rows 29-63 (SPLITTER TOPOLOGY sub-table).
 
-    Strategy:
-      1. Build a {slot_id: splitter} map by direct ID equality (both the template
-         slot IDs in column A and the DMP splitter IDs follow the IA-diagram
-         convention '710-LX500-N' / '710-KP-N').
-      2. For each pre-seeded slot ID in template column A (rows 29-63), fill cols
-         B (location), C (combined section title), D (combus input), and E/F/G
-         (combus outputs 1/2/3) from the matching DMP splitter.
+    Splitter-driven: every splitter in the design is written to a consecutive row
+    starting at 29, in display order, with col A set to its real ID.
+
+    It used to be slot-driven — walk the template's placeholder IDs in col A and
+    match a splitter by exact ID equality. That silently dropped any splitter whose
+    ID named no slot. The template spreads its LX slots over five buses
+    (710-LX500-1..5, 710-LX600-1..5, ... 710-LX900-1..5), but hardware.next_splitter_id
+    numbers every LX splitter on the 500 bus up to MAX_SPLITTERS_PER_TYPE, so a job
+    with six or more LX splitters lost the sixth onward with no error — HAYNES_CHARTER_ES
+    shipped without 710-LX500-6 and 710-LX500-7. Col A is an internal key: the
+    LX-KP-710s tab reads only cols C-G, so overwriting it is safe.
 
     Returns (filled Master rows in ascending order, cells written) — the row list
     drives the LX-KP-710s tab's chart compaction.
     """
     filled_rows: list[int] = []
     n_cells = 0
-    slot_to_splitter = _build_slot_to_splitter_map(dmp_design)
+    splitters = sorted(dmp_design.splitters, key=_splitter_sort_key)
 
-    for row in range(29, 64):
-        slot_id = master[f"A{row}"].value
-        if not slot_id:
-            continue
-        s = slot_to_splitter.get(str(slot_id).strip())
-        if not s:
-            continue
+    capacity = min(len(_TOPOLOGY_ROWS), _MAX_TOPOLOGY_CHARTS)
+    if len(splitters) > capacity:
+        raise ValueError(
+            f"{len(splitters)} splitters, but the door chart template holds at most "
+            f"{capacity} (Master rows {_TOPOLOGY_ROWS.start}-{_TOPOLOGY_ROWS.stop - 1}, "
+            f"{_MAX_TOPOLOGY_CHARTS} chart slots). Refusing to drop any silently.")
+
+    for row, s in zip(_TOPOLOGY_ROWS, splitters):
         filled_rows.append(row)
+
+        # Col A — the real splitter ID, replacing the template's placeholder slot
+        master[f"A{row}"] = s.id
 
         # Col B — LOCATION
         if s.location:
@@ -506,6 +530,11 @@ def _populate_splitter_topology(master, dmp_design: DMPDesign) -> tuple[list[int
                 col = chr(ord("E") + i)  # 'E', 'F', 'G'
                 master[f"{col}{row}"] = out
                 n_cells += 1
+
+    # Clear the template's leftover placeholder slot IDs below the real data, so
+    # Master shows this job's topology and nothing else.
+    for row in _TOPOLOGY_ROWS[len(splitters):]:
+        master[f"A{row}"] = None
 
     return filled_rows, n_cells
 

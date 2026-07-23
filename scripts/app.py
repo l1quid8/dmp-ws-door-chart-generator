@@ -6,7 +6,7 @@ import subprocess
 import contextlib
 import tempfile
 import webbrowser
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import tkinter as tk
@@ -43,13 +43,25 @@ from session import (
     unique_session_path,
 )
 from editor_frame import EditorFrame
+from editor_tabs import auto_hide_scrollbar
 from rl_injector.xml_export import generate_account_xml
+import theme
+from ui_widgets import (
+    Card,
+    Chip,
+    IconTile,
+    ModeToggle,
+    SectionLabel,
+    bind_click,
+    ghost_button,
+    primary_button,
+    remove_button,
+    secondary_button,
+)
 import updater
 
 DOOR_CHART_TEMPLATE = resource_path("door_chart_template_blank.xlsx")
 PREFS_PATH = Path.home() / ".c1_door_chart_app.json"
-ACCENT = "#4a7bb8"
-ACCENT_HOVER = "#3a6aa8"
 SPINNER_FRAMES = list("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
 _WORKFLOW_HELP = """The editor is the working document. The Excel files are artifacts \
@@ -90,7 +102,6 @@ Removing hardware re-points anything that fed it to "Spare" and unsources affect
 keypads — the app pops a summary and routes you to review the new wiring. Template \
 capacities: 15 expanders, 12 LX + 12 KP splitters, 28 keypads."""
 
-ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
 
 
@@ -113,6 +124,19 @@ def open_file(path: Path) -> None:
         os.startfile(str(path))
     else:
         subprocess.Popen(["xdg-open", str(path)])
+
+
+def reveal_in_folder(path: Path) -> None:
+    """Show `path` selected in the OS file browser.
+
+    Linux has no cross-desktop "reveal", so it settles for opening the parent.
+    """
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    elif sys.platform == "win32":
+        subprocess.Popen(["explorer", f"/select,{path}"])
+    else:
+        subprocess.Popen(["xdg-open", str(Path(path).parent)])
 
 
 def load_prefs() -> dict:
@@ -156,6 +180,10 @@ class TextRedirector:
 
 class App:
     def __init__(self):
+        # Resolve the appearance mode before the first widget exists —
+        # CustomTkinter samples the active mode when a widget is constructed,
+        # so a later switch would leave the root window in the wrong palette.
+        theme.set_mode(load_prefs().get("appearance_mode", "light"))
         self.root = CTkDnD()
         _version = _app_version()
         self.root.title(APP_NAME + (f"  v{_version}" if _version else ""))
@@ -223,6 +251,10 @@ class App:
         try:
             self.root.drop_target_register(DND_FILES)
             self.root.dnd_bind("<<Drop>>", self._on_drop)
+            # Enter/leave only light up the drop zone. They must hand tkdnd the
+            # incoming action back verbatim, or the drop itself is refused.
+            self.root.dnd_bind("<<DropEnter>>", self._on_drag_over)
+            self.root.dnd_bind("<<DropLeave>>", self._on_drag_out)
         except Exception as e:
             print(f"Drag-and-drop unavailable: {e}", file=sys.stderr)
 
@@ -248,8 +280,9 @@ class App:
         self._build_menubar()
         self._build_toolbar()
 
+        # The header's 1px bottom border.
         ctk.CTkFrame(self.root, height=1, corner_radius=0,
-                     fg_color=("gray80", "gray28")).grid(row=1, column=0, sticky="ew")
+                     fg_color=theme.BORDER).grid(row=1, column=0, sticky="ew")
 
         # Main area
         self.main = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -257,16 +290,23 @@ class App:
         self.main.columnconfigure(0, weight=1)
         self.main.rowconfigure(0, weight=1)
 
-        # Centered flow column (home / progress / review screens). A plain
-        # frame — content is small and fixed, and CTkScrollableFrame's
-        # always-visible scrollbar trough reads as an empty panel. Top-anchored
-        # via sticky n; main's weight-1 column centers it horizontally.
-        self.flow = ctk.CTkFrame(self.main, fg_color="transparent")
-        self.flow.grid(row=0, column=0, sticky="n")
-        self.flow.columnconfigure(0, weight=1, minsize=560)
+        # Centered flow column (home / progress / review screens), inside a
+        # scroll host. The home stack — drop zone, recents, output-folder row —
+        # is now taller than the minimum window, and the output-folder picker
+        # is the only way to change where files land, so it must never be
+        # stranded below the fold. auto_hide_scrollbar keeps the trough out of
+        # sight until it's actually needed.
+        self._flow_host = ctk.CTkScrollableFrame(self.main, fg_color="transparent")
+        self._flow_host.grid(row=0, column=0, sticky="nsew")
+        self._flow_host.columnconfigure(0, weight=1)
+        auto_hide_scrollbar(self._flow_host)
+
+        self.flow = ctk.CTkFrame(self._flow_host, fg_color="transparent")
+        self.flow.grid(row=0, column=0)
+        self.flow.columnconfigure(0, weight=1, minsize=600)
 
         self.input_section = ctk.CTkFrame(self.flow, fg_color="transparent")
-        self.input_section.grid(row=0, column=0, sticky="ew", pady=(16, 0))
+        self.input_section.grid(row=0, column=0, sticky="ew", pady=(36, 0))
         self.input_section.columnconfigure(0, weight=1)
 
         self.action_section = ctk.CTkFrame(self.flow, fg_color="transparent")
@@ -284,7 +324,7 @@ class App:
         self._build_terminal()
 
         ctk.CTkFrame(self.root, height=1, corner_radius=0,
-                     fg_color=("gray80", "gray28")).grid(row=4, column=0, sticky="ew")
+                     fg_color=theme.BORDER).grid(row=4, column=0, sticky="ew")
         self._build_statusbar()
 
     def _build_menubar(self):
@@ -393,93 +433,98 @@ class App:
             "Generate Door Chart", state="normal" if can_chart else "disabled")
 
     def _build_toolbar(self):
-        bar = ctk.CTkFrame(self.root, fg_color=("gray95", "gray15"),
-                           corner_radius=0, height=46)
+        bar = ctk.CTkFrame(self.root, fg_color=theme.CHROME,
+                           corner_radius=0, height=theme.HEIGHT["header"])
         bar.grid(row=0, column=0, sticky="ew")
         bar.grid_propagate(False)
-        bar.columnconfigure(2, weight=1)
+        bar.columnconfigure(3, weight=1)  # spacer: pushes the right-hand controls out
 
-        # Small brand mark (full logo lives on the home view only)
-        logo_path = resource_path("logos/ConvergeOne_logo.png")
+        # Icon-only mark; the wordmark is too wide for a 52px bar.
+        logo_path = resource_path("logos/c1_icon_logo_transparent.png")
         try:
             from PIL import Image as _PILImage
             pil_img = _PILImage.open(logo_path)
-            w, h = pil_img.size
-            mark_h = 22
-            self._toolbar_logo = ctk.CTkImage(light_image=pil_img,
-                                              size=(int(mark_h * w / h), mark_h))
+            self._toolbar_logo = ctk.CTkImage(light_image=pil_img, size=(22, 22))
             ctk.CTkLabel(bar, image=self._toolbar_logo, text="").grid(
-                row=0, column=0, padx=(14, 10), pady=12)
+                row=0, column=0, padx=(theme.PAD["lg"], 10))
         except Exception:
-            ctk.CTkLabel(bar, text="C1", font=ctk.CTkFont(size=14, weight="bold"),
-                         text_color=ACCENT).grid(row=0, column=0, padx=(14, 10))
-
-        ctk.CTkFrame(bar, width=1, height=22,
-                     fg_color=("gray80", "gray28")).grid(row=0, column=1)
+            ctk.CTkLabel(bar, text="C1",
+                         font=theme.ui_font(theme.SIZE["title"], "bold"),
+                         text_color=theme.ACCENT).grid(
+                row=0, column=0, padx=(theme.PAD["lg"], 10))
 
         title_cell = ctk.CTkFrame(bar, fg_color="transparent")
-        title_cell.grid(row=0, column=2, sticky="w", padx=(12, 0))
+        title_cell.grid(row=0, column=1, sticky="w")
         self._title_lbl = ctk.CTkLabel(
             title_cell, text="No project open",
-            font=ctk.CTkFont(size=13, weight="bold"), text_color="gray45",
-            anchor="w",
+            font=theme.ui_font(theme.SIZE["title"], "bold"),
+            text_color=theme.TEXT_TERTIARY, anchor="w",
         )
-        self._title_lbl.pack(side="left")
-        self._dirty_lbl = ctk.CTkLabel(
-            title_cell, text="", width=16,
-            font=ctk.CTkFont(size=13, weight="bold"), text_color="#c05621",
+        self._title_lbl.pack(anchor="w")
+        # The source filename identifies the project, so it belongs under the
+        # project name rather than off in the status bar.
+        self._source_lbl = ctk.CTkLabel(
+            title_cell, text="", font=theme.ui_font(theme.SIZE["meta"]),
+            text_color=theme.TEXT_TERTIARY, anchor="w",
         )
-        self._dirty_lbl.pack(side="left")
+
+        # Save state reads as a pill beside the title; hidden with no project.
+        self._save_pill = Chip(bar, "", variant="success",
+                               size=theme.SIZE["label"])
+
+        self._mode_toggle = ModeToggle(bar, on_change=self._on_mode_change)
+        self._mode_toggle.grid(row=0, column=4, padx=(0, theme.PAD["sm"]))
 
         # File/worksheet actions now live in the native menu bar. The only
         # toolbar control is a quick "close project" affordance at the far
-        # right; the weight-1 title column (col 2) pushes it there.
-        self._close_btn = ctk.CTkButton(
-            bar, text="✕  Close project", height=30, width=120,
-            fg_color="transparent", border_width=1, border_color="gray60",
-            text_color=("gray25", "gray85"), hover_color=("gray90", "gray25"),
-            font=ctk.CTkFont(size=12),
-            command=self._process_another,
+        # right; the weight-1 spacer column (col 3) pushes it there.
+        self._close_btn = ghost_button(
+            bar, "✕  Close project", self._process_another,
+            height=theme.HEIGHT["button_md"], width=120,
+            border_width=1, border_color=theme.BORDER_STRONG,
         )
-        self._close_btn.grid(row=0, column=3, padx=(0, 12), pady=8)
+        self._close_btn.grid(row=0, column=5, padx=(0, theme.PAD["md"]))
         self._set_toolbar_enabled(False)
 
     def _build_statusbar(self):
-        bar = ctk.CTkFrame(self.root, fg_color=("gray97", "gray13"),
-                           corner_radius=0, height=28)
+        bar = ctk.CTkFrame(self.root, fg_color=theme.CHROME,
+                           corner_radius=0, height=theme.HEIGHT["statusbar"])
         bar.grid(row=5, column=0, sticky="ew")
         bar.grid_propagate(False)
-        bar.columnconfigure(2, weight=1)
+        bar.columnconfigure(1, weight=1)
 
         self._status_lbl = ctk.CTkLabel(bar, text="Ready",
-                                        font=ctk.CTkFont(size=11),
-                                        text_color="gray50", anchor="w")
-        self._status_lbl.grid(row=0, column=0, sticky="w", padx=(14, 12))
+                                        font=theme.ui_font(theme.SIZE["meta"]),
+                                        text_color=theme.TEXT_TERTIARY, anchor="w")
+        self._status_lbl.grid(row=0, column=0, sticky="w",
+                              padx=(theme.PAD["lg"], theme.PAD["md"]))
 
-        self._source_lbl = ctk.CTkLabel(bar, text="", font=ctk.CTkFont(size=11),
-                                        text_color="gray60", anchor="w")
-        self._source_lbl.grid(row=0, column=1, sticky="w")
+        # Deliberately NOT a second copy of the save state or the validation
+        # chips — the header pill and the editor footer own those. This bar
+        # answers the question neither of them does: where do generated files
+        # land?
+        self._outdir_lbl = ctk.CTkLabel(bar, text="",
+                                        font=theme.ui_font(theme.SIZE["meta"]),
+                                        text_color=theme.TEXT_TERTIARY, anchor="e")
+        self._outdir_lbl.grid(row=0, column=2, sticky="e", padx=(0, theme.PAD["md"]))
 
-        self._issues_lbl = ctk.CTkLabel(bar, text="", font=ctk.CTkFont(size=11),
-                                        text_color="#c05621", anchor="e")
-        self._issues_lbl.grid(row=0, column=3, sticky="e", padx=(0, 12))
-
-        self._term_btn = ctk.CTkButton(
-            bar, text="▷ terminal", width=84, height=20,
-            fg_color="transparent", text_color=ACCENT,
-            hover_color=("gray90", "gray25"), border_width=0,
-            font=ctk.CTkFont(size=11),
-            command=self._toggle_terminal,
+        self._term_btn = ghost_button(
+            bar, "▷ terminal", self._toggle_terminal,
+            width=84, height=20, text_color=theme.ACCENT,
+            font=theme.ui_font(theme.SIZE["meta"]),
         )
-        self._term_btn.grid(row=0, column=4, sticky="e", padx=(0, 10))
+        self._term_btn.grid(row=0, column=3, sticky="e", padx=(0, theme.PAD["sm"]))
 
     def _build_terminal(self):
         self.term_text = ctk.CTkTextbox(
             self.term_section,
             height=200,
-            font=ctk.CTkFont(family="Courier", size=11),
-            fg_color="#1e1e1e",
-            text_color="#d4d4d4",
+            font=ctk.CTkFont(family=theme.MONO_FAMILY, size=theme.SIZE["meta"]),
+            fg_color=theme.SURFACE_SUBTLE,
+            text_color=theme.TEXT_SECOND,
+            border_width=1,
+            border_color=theme.BORDER,
+            corner_radius=theme.RADIUS["card"],
             state="disabled",
             wrap="word",
         )
@@ -508,21 +553,38 @@ class App:
         else:
             self._close_btn.grid_remove()
 
-    def _set_project_title(self, text: str | None, dirty: bool = False):
+    def _on_mode_change(self, mode: str):
+        """Persist the header toggle's choice. app.py owns the prefs file."""
+        save_prefs({**load_prefs(), "appearance_mode": mode})
+
+    def _set_project_title(self, text: str | None, dirty: bool = False,
+                           status: str = ""):
+        """Paint the header's project block. `status` is the editor's save
+        string ("Saved 2:41 PM ✓"), which the saved pill shows verbatim."""
         if text:
-            self._title_lbl.configure(text=text, text_color=("gray15", "gray90"))
+            self._title_lbl.configure(text=text.upper(), text_color=theme.TEXT)
+            if self._source_lbl.winfo_manager() != "pack":
+                self._source_lbl.pack(anchor="w")
+            self._save_pill.set_variant("warning" if dirty else "success")
+            self._save_pill.set_text(
+                "● Unsaved changes" if dirty else (status or "Saved ✓"))
+            self._save_pill.grid(row=0, column=2, padx=(theme.PAD["md"], 0))
         else:
-            self._title_lbl.configure(text="No project open", text_color="gray45")
-        self._dirty_lbl.configure(text="●" if dirty else "")
+            self._title_lbl.configure(text="No project open",
+                                      text_color=theme.TEXT_TERTIARY)
+            self._source_lbl.pack_forget()
+            self._save_pill.grid_remove()
 
     def _on_editor_status(self, text: str, dirty: bool):
-        """EditorFrame save-state callback → status bar + toolbar title."""
-        self._status_lbl.configure(
-            text=text, text_color="#c05621" if dirty else "gray50")
+        """EditorFrame save-state callback → the header save pill.
+
+        The status bar deliberately stays out of this: the pill and the editor
+        footer's Save button already say it, and a third voice saying the same
+        thing reads as noise, not reassurance."""
         school = ""
         if self.session:
             school = self.session.design.site_info.school_name or "Untitled project"
-        self._set_project_title(school, dirty)
+        self._set_project_title(school, dirty, status=text)
         # The first save creates session.path, which enables Revert.
         self._set_toolbar_enabled(self.state == "editing")
 
@@ -548,13 +610,13 @@ class App:
         self._enter_editor(fresh)
 
     def _on_editor_validation(self, text: str, ok: bool):
-        self._issues_lbl.configure(text=text,
-                                   text_color="#2f855a" if ok else "#c05621")
+        """Validation is surfaced by the tab-bar badges and the footer's issue
+        chips, both owned by EditorFrame. The shell has nothing to add."""
 
     def _show_flow(self):
         """Show the centered flow column (and hide the editor surface)."""
         self.editor_section.grid_remove()
-        self.flow.grid(row=0, column=0, sticky="n")
+        self._flow_host.grid(row=0, column=0, sticky="nsew")
 
     # ------------------------------------------------------------------ #
     # Section 1 — Input                                                     #
@@ -569,76 +631,97 @@ class App:
         self._clear_input_section()
         self._show_flow()
         self._set_project_title(None)
-        self._status_lbl.configure(text="Ready", text_color="gray50")
+        self._status_lbl.configure(text="Ready", text_color=theme.TEXT_TERTIARY)
         self._source_lbl.configure(text="")
-        self._issues_lbl.configure(text="")
+        self._outdir_lbl.configure(text="")
 
-        # Full brand logo lives here, on the welcome surface only.
-        logo_path = resource_path("logos/ConvergeOne_logo.png")
-        try:
-            from PIL import Image as _PILImage
-            pil_img = _PILImage.open(logo_path)
-            self._home_logo = ctk.CTkImage(light_image=pil_img, size=(140, 62))
-            ctk.CTkLabel(self.input_section, image=self._home_logo, text="").grid(
-                row=0, column=0, pady=(4, 14))
-        except Exception:
-            pass
-
+        # Tk frames can't draw a dashed border, so the spec's dashed outline
+        # degrades to a solid 2px one in the same colour.
         dz = ctk.CTkFrame(
             self.input_section,
             border_width=2,
-            border_color="gray70",
-            corner_radius=10,
-            fg_color=("gray97", "gray20"),
-            height=140,
+            border_color=theme.BORDER_STRONG,
+            corner_radius=12,
+            fg_color=theme.SURFACE,
         )
         dz.grid(row=1, column=0, sticky="ew")
         dz.columnconfigure(0, weight=1)
-        dz.grid_propagate(False)
+        # Let the zone shrink-wrap its contents and impose the target size as a
+        # row floor instead. Pinning the frame's own height clipped the
+        # file-type chips off the bottom edge the moment the stack grew.
+        self.input_section.rowconfigure(1, minsize=168)
+        self._drop_zone = dz
 
-        ctk.CTkLabel(dz, text="⬆", font=ctk.CTkFont(size=36)).grid(row=0, column=0, pady=(22, 2))
+        IconTile(dz, "⬆", size=44).grid(row=0, column=0, pady=(22, 10))
         ctk.CTkLabel(
-            dz,
-            text="Drop a PDF, DMP worksheet (.xlsx), or project (.dmps) here",
-            font=ctk.CTkFont(size=14, weight="bold"),
+            dz, text="Drop a design file to start",
+            font=theme.ui_font(theme.SIZE["drop_title"], "bold"),
+            text_color=theme.TEXT,
         ).grid(row=1, column=0)
-        ctk.CTkLabel(
-            dz,
-            text="e.g. SCHOOL_INTRUSION_DESIGN.pdf  ·  SCHOOL_dmp_2026-05-29.xlsx  ·  click to browse",
-            font=ctk.CTkFont(size=11),
-            text_color="gray50",
-        ).grid(row=2, column=0, pady=(2, 14))
 
-        def on_enter(_): dz.configure(border_color=ACCENT)
-        def on_leave(_): dz.configure(border_color="gray70")
+        sub = ctk.CTkFrame(dz, fg_color="transparent")
+        sub.grid(row=2, column=0, pady=(3, 0))
+        ctk.CTkLabel(sub, text="or ", font=theme.ui_font(theme.SIZE["chip"]),
+                     text_color=theme.TEXT_SECOND).pack(side="left")
+        ctk.CTkLabel(sub, text="browse…",
+                     font=theme.ui_font(theme.SIZE["chip"], "bold"),
+                     text_color=theme.ACCENT).pack(side="left")
 
-        for widget in [dz] + list(dz.winfo_children()):
-            widget.bind("<Button-1>", lambda _: self._choose_pdf())
-            widget.bind("<Enter>", on_enter)
-            widget.bind("<Leave>", on_leave)
+        types = ctk.CTkFrame(dz, fg_color="transparent")
+        types.grid(row=3, column=0, pady=(12, 20))
+        for kind in ("PDF", "XLSX", "DMPS"):
+            Chip(types, kind, size=theme.SIZE["label"]).pack(side="left", padx=3)
+
+        def walk(widget):
+            yield widget
+            for child in widget.winfo_children():
+                yield from walk(child)
+
+        for widget in walk(dz):
+            widget.bind("<Button-1>", lambda _e: self._choose_pdf())
+            widget.bind("<Enter>", lambda _e: self._set_drop_active(True))
+            widget.bind("<Leave>", lambda _e: self._set_drop_active(False))
 
         self._show_recent_projects()
         self._show_output_dir_row()
+
+    def _set_drop_active(self, active: bool):
+        """Accent the drop zone — shared by pointer hover and drag-over."""
+        dz = getattr(self, "_drop_zone", None)
+        if dz is None or not dz.winfo_exists():
+            return
+        dz.configure(border_color=theme.ACCENT if active else theme.BORDER_STRONG)
+
+    def _on_drag_over(self, event):
+        self._set_drop_active(True)
+        # tkdnd reads the handler's return value as the accepted action;
+        # anything else refuses the drop.
+        return getattr(event, "action", "copy")
+
+    def _on_drag_out(self, event):
+        self._set_drop_active(False)
+        return getattr(event, "action", "copy")
 
     def _show_output_dir_row(self):
         # Output-folder picker lives on the home screen now that the old
         # job-details form (its previous host) is gone.
         row = ctk.CTkFrame(self.input_section, fg_color="transparent")
-        row.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        row.grid(row=3, column=0, sticky="ew", pady=(theme.PAD["md"], 0))
         row.columnconfigure(1, weight=1)
-        ctk.CTkLabel(row, text="Save output to:", font=ctk.CTkFont(size=11),
-                     text_color="gray50").grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(row, text="Save output to:",
+                     font=theme.ui_font(theme.SIZE["meta"]),
+                     text_color=theme.TEXT_TERTIARY).grid(row=0, column=0, sticky="w")
         self._output_dir_label = ctk.CTkLabel(
-            row, text=str(self.output_dir), font=ctk.CTkFont(size=11),
-            text_color=ACCENT, anchor="w",
+            row, text=str(self.output_dir), font=theme.ui_font(theme.SIZE["meta"]),
+            text_color=theme.ACCENT, anchor="w",
         )
         self._output_dir_label.grid(row=0, column=1, sticky="w", padx=(6, 0))
-        ctk.CTkButton(
-            row, text="Change…", width=80, height=24,
-            fg_color="transparent", border_width=1, border_color="gray60",
-            text_color=("gray30", "gray80"), hover_color=("gray90", "gray25"),
-            command=self._choose_output_dir,
-        ).grid(row=0, column=2, padx=(8, 0))
+        change = ctk.CTkLabel(
+            row, text="Change", text_color=theme.ACCENT,
+            font=ctk.CTkFont(size=theme.SIZE["meta"], weight="bold", underline=True),
+        )
+        change.grid(row=0, column=2, padx=(theme.PAD["sm"], 0))
+        bind_click(change, self._choose_output_dir)
 
     def _show_recent_projects(self):
         recents = list_recent_sessions(limit=4)
@@ -646,43 +729,58 @@ class App:
             return
 
         frame = ctk.CTkFrame(self.input_section, fg_color="transparent")
-        frame.grid(row=2, column=0, sticky="ew", pady=(16, 0))
+        frame.grid(row=2, column=0, sticky="ew", pady=(theme.PAD["lg"], 0))
         frame.columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            frame, text="Recent projects",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        SectionLabel(frame, "Recent projects").grid(
+            row=0, column=0, sticky="w", pady=(0, 6))
 
         for i, summary in enumerate(recents):
-            row = ctk.CTkFrame(frame, corner_radius=8, fg_color=("gray97", "gray20"))
-            row.grid(row=i + 1, column=0, sticky="ew", pady=3)
-            row.columnconfigure(0, weight=1)
+            card = Card(frame, hoverable=True)
+            card.grid(row=i + 1, column=0, sticky="ew", pady=3)
+            card.columnconfigure(1, weight=1)
 
-            saved = (summary.saved_at or "")[:16].replace("T", " ")
-            sub = f"Saved {saved}" + (f"  ·  from {summary.source_name}"
-                                      if summary.source_name else "")
-            ctk.CTkLabel(
-                row, text=summary.school_name,
-                font=ctk.CTkFont(size=12, weight="bold"), anchor="w",
-            ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
-            ctk.CTkLabel(
-                row, text=sub, font=ctk.CTkFont(size=10),
-                text_color="gray50", anchor="w",
-            ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+            initial = (summary.school_name or "?").strip()[:1].upper() or "?"
+            IconTile(card, initial, size=34,
+                     font_size=theme.SIZE["title"]).grid(
+                row=0, column=0, rowspan=2, padx=(theme.PAD["md"], 10),
+                pady=theme.PAD["sm"])
 
-            ctk.CTkButton(
-                row, text="Open", width=64, height=28,
-                fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                command=lambda p=summary.path: self._open_session_path(p),
-            ).grid(row=0, column=1, rowspan=2, padx=(4, 6))
-            ctk.CTkButton(
-                row, text="✕", width=28, height=28,
-                fg_color="transparent", text_color="gray50",
-                hover_color=("gray90", "gray25"),
-                command=lambda p=summary.path, n=summary.school_name:
+            ctk.CTkLabel(
+                card, text=summary.school_name,
+                font=theme.ui_font(theme.SIZE["body"], "bold"),
+                text_color=theme.TEXT, anchor="w",
+            ).grid(row=0, column=1, sticky="w", pady=(theme.PAD["sm"], 0))
+            ctk.CTkLabel(
+                card, text=self._recent_meta(summary),
+                font=theme.ui_font(theme.SIZE["meta"]),
+                text_color=theme.TEXT_TERTIARY, anchor="w",
+            ).grid(row=1, column=1, sticky="w", pady=(0, theme.PAD["sm"]))
+
+            primary_button(
+                card, "Open", lambda p=summary.path: self._open_session_path(p),
+                height=theme.HEIGHT["button_sm"], width=64,
+            ).grid(row=0, column=2, rowspan=2, padx=(theme.PAD["sm"], 6))
+            remove_button(
+                card,
+                lambda p=summary.path, n=summary.school_name:
                     self._delete_session(p, n),
-            ).grid(row=0, column=2, rowspan=2, padx=(0, 8))
+            ).grid(row=0, column=3, rowspan=2, padx=(0, theme.PAD["sm"]))
+
+    @staticmethod
+    def _recent_meta(summary) -> str:
+        """"Saved Jul 1, 1:38 PM · from northview.pdf" — the ISO timestamp read
+        as machine output, so it's rendered the way a person would say it.
+        %-d / %-I aren't portable, hence the manual assembly."""
+        saved = summary.saved_at or ""
+        with contextlib.suppress(ValueError, TypeError):
+            when = datetime.fromisoformat(summary.saved_at)
+            saved = (f"{when:%b} {when.day}, {when.hour % 12 or 12}"
+                     f":{when:%M} {when:%p}")
+        parts = [f"Saved {saved}"] if saved else []
+        if summary.source_name:
+            parts.append(f"from {summary.source_name}")
+        return "  ·  ".join(parts)
 
     def _delete_session(self, path: Path, name: str):
         if not messagebox.askyesno(
@@ -701,60 +799,52 @@ class App:
                         busy_text: str = " Parsing PDF…"):
         self._clear_input_section()
 
-        card = ctk.CTkFrame(
-            self.input_section,
-            border_width=2,
-            border_color=ACCENT,
-            corner_radius=10,
-            fg_color=("#f4f7fb", "gray18"),
-        )
+        card = Card(self.input_section, border_color=theme.ACCENT,
+                    fg_color=theme.ACCENT_TINT)
         card.grid(row=0, column=0, sticky="ew")
         card.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(card, text="📄", font=ctk.CTkFont(size=28)).grid(
-            row=0, column=0, rowspan=2, padx=(16, 8), pady=14
-        )
+        IconTile(card, "📄", size=40, tint=theme.SURFACE,
+                 font_size=20).grid(row=0, column=0, rowspan=2,
+                                    padx=(theme.PAD["md"], 10),
+                                    pady=theme.PAD["md"])
 
         name_text = filename if len(filename) <= 52 else filename[:49] + "…"
         ctk.CTkLabel(
             card,
             text=name_text,
-            font=ctk.CTkFont(size=12, weight="bold"),
+            font=theme.ui_font(theme.SIZE["control"], "bold"),
+            text_color=theme.TEXT,
             anchor="w",
-        ).grid(row=0, column=1, sticky="w", pady=(14, 2))
+        ).grid(row=0, column=1, sticky="w", pady=(theme.PAD["md"], 2))
 
         if parsing:
             det_frame = ctk.CTkFrame(card, fg_color="transparent")
-            det_frame.grid(row=1, column=1, sticky="w", pady=(0, 6))
+            det_frame.grid(row=1, column=1, sticky="w", pady=(0, theme.PAD["md"]))
             self._det_spinner_lbl = ctk.CTkLabel(
-                det_frame, text="⠋", text_color="gray50", font=ctk.CTkFont(size=12), width=18
+                det_frame, text="⠋", text_color=theme.TEXT_SECOND,
+                font=theme.ui_font(theme.SIZE["control"]), width=18,
             )
             self._det_spinner_lbl.pack(side="left")
             ctk.CTkLabel(
-                det_frame, text=busy_text, text_color="gray50", font=ctk.CTkFont(size=12)
+                det_frame, text=busy_text, text_color=theme.TEXT_SECOND,
+                font=theme.ui_font(theme.SIZE["control"]),
             ).pack(side="left")
             self._start_label_spinner(self._det_spinner_lbl)
         else:
             ctk.CTkLabel(
                 card,
                 text=f"Detected: {school_name}",
-                text_color=ACCENT,
-                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=theme.ACCENT,
+                font=theme.ui_font(theme.SIZE["control"], "bold"),
                 anchor="w",
-            ).grid(row=1, column=1, sticky="w", pady=(0, 6))
+            ).grid(row=1, column=1, sticky="w", pady=(0, theme.PAD["md"]))
 
-        ctk.CTkButton(
-            card,
-            text="Replace",
-            width=80,
-            height=28,
-            fg_color="transparent",
-            border_width=1,
-            border_color="gray60",
-            text_color=("gray30", "gray80"),
-            hover_color=("gray90", "gray25"),
-            command=self._replace_pdf,
-        ).grid(row=0, column=2, rowspan=2, padx=12, pady=14)
+        secondary_button(
+            card, "Replace", self._replace_pdf,
+            height=theme.HEIGHT["button_sm"], width=80,
+        ).grid(row=0, column=2, rowspan=2, padx=theme.PAD["md"],
+               pady=theme.PAD["md"])
 
     def _show_parse_error(self, exc: Exception, title: str = "Couldn't parse PDF"):
         self._clear_input_section()
@@ -774,30 +864,43 @@ class App:
         save_prefs({**load_prefs(), "output_dir": str(self.output_dir)})
         with contextlib.suppress(Exception):
             self._output_dir_label.configure(text=str(self.output_dir))
+        self._show_output_dir_status()
+
+    def _show_output_dir_status(self):
+        """Mirror the output folder in the status bar while a project is open —
+        the home screen's picker is out of sight once you're editing, and it's
+        the first thing you look for after a generate."""
+        text = f"Output → {self.output_dir}" if self.state == "editing" else ""
+        with contextlib.suppress(Exception):
+            self._outdir_lbl.configure(text=text)
 
     # ------------------------------------------------------------------ #
     # Error card                                                            #
     # ------------------------------------------------------------------ #
 
     def _make_error_card(self, parent, title: str, exc: Exception, retry):
-        card = ctk.CTkFrame(
-            parent, fg_color=("#fff5f5", "gray20"),
-            border_width=1, border_color="#ffcdd2", corner_radius=8,
-        )
-        card.grid(row=0, column=0, sticky="ew", pady=4)
+        card = Card(parent, fg_color=theme.ERROR_TINT,
+                    border_color=theme.ERROR_BORDER)
+        card.grid(row=0, column=0, sticky="ew", pady=theme.PAD["xs"])
         card.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(card, text="⚠", text_color="#e53e3e",
-                     font=ctk.CTkFont(size=20)).grid(row=0, column=0, padx=(14, 8), pady=(14, 4), sticky="n")
+        ctk.CTkLabel(card, text="⚠", text_color=theme.ERROR,
+                     font=theme.ui_font(20, "bold")).grid(
+            row=0, column=0, padx=(theme.PAD["lg"], theme.PAD["sm"]),
+            pady=(theme.PAD["lg"], theme.PAD["xs"]), sticky="n")
 
         info = ctk.CTkFrame(card, fg_color="transparent")
-        info.grid(row=0, column=1, sticky="ew", pady=12, padx=(0, 14))
-        ctk.CTkLabel(info, text=title, font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color="#e53e3e", anchor="w").pack(anchor="w")
-        ctk.CTkLabel(info, text=str(exc)[:200], font=ctk.CTkFont(size=11),
-                     text_color="gray50", anchor="w", wraplength=380).pack(anchor="w", pady=(2, 8))
-        ctk.CTkButton(info, text="Try again", width=90, height=30,
-                      fg_color=ACCENT, hover_color=ACCENT_HOVER, command=retry).pack(anchor="w")
+        info.grid(row=0, column=1, sticky="ew", pady=theme.PAD["md"],
+                  padx=(0, theme.PAD["lg"]))
+        ctk.CTkLabel(info, text=title,
+                     font=theme.ui_font(theme.SIZE["body"], "bold"),
+                     text_color=theme.ERROR, anchor="w").pack(anchor="w")
+        ctk.CTkLabel(info, text=str(exc)[:200],
+                     font=theme.ui_font(theme.SIZE["meta"]),
+                     text_color=theme.TEXT_SECOND, anchor="w",
+                     wraplength=380).pack(anchor="w", pady=(2, theme.PAD["sm"]))
+        primary_button(info, "Try again", retry, width=90,
+                       height=theme.HEIGHT["button_md"]).pack(anchor="w")
 
     # ------------------------------------------------------------------ #
     # Toast                                                                 #
@@ -809,45 +912,134 @@ class App:
         open_file(path)
         self._show_toast(f"Opening {path.name} in Excel…")
 
-    def _show_toast(self, message: str, action: tuple | None = None):
-        """Slide-in notification. `action` is an optional ("Label", callback)
-        button — used by generation completions ("rev 3 ready — Open"); a
-        toast with an action lingers longer so it can actually be clicked."""
-        self.root.update_idletasks()
-        rx, ry = self.root.winfo_x(), self.root.winfo_y()
-        rw, rh = self.root.winfo_width(), self.root.winfo_height()
-        tw, th = (440, 48) if action else (360, 48)
-        tx = rx + (rw - tw) // 2
-        ty_end = ry + rh - 70
-        ty_start = ty_end + 20
+    def _show_toast(self, message: str, action: tuple | None = None, *,
+                    meta: str | None = None, folder: Path | None = None):
+        """Slide-in completion card, bottom-right of the window.
+
+        `action` is an optional ("Label", callback) button — used by generation
+        completions ("rev 3 ready — Open"); a toast with an action lingers
+        longer so it can actually be clicked. `meta` is the second line and
+        `folder` adds a "Folder" button that reveals that path.
+
+        It's a raw tk.Toplevel, so every colour goes through theme.resolve()
+        and is re-applied on a mode switch. Tk gives raw frames no corner
+        radius, so the card and the ✓ tile are square-cornered.
+        """
+        cursor = "pointinghand" if sys.platform == "darwin" else "hand2"
 
         toast = tk.Toplevel(self.root)
         toast.overrideredirect(True)
-        toast.configure(bg="#1c1c1e")
-        toast.geometry(f"{tw}x{th}+{tx}+{ty_start}")
-        toast.attributes("-alpha", 0.92)
-        tk.Label(toast, text=message, bg="#1c1c1e", fg="white",
-                 font=("Helvetica", 12), padx=16, pady=12).pack(
-            side="left", expand=True, fill="x")
+        # Tie it to the main window: without this, anything that raises the
+        # root (clicking back into the app after a generate) buries the toast
+        # behind it, and the "Open" button it exists to offer is unreachable.
+        toast.transient(self.root)
+        # The toplevel's own background, showing through a 1px inset, IS the
+        # card border — a raw tk.Frame has no border_color of its own.
+        card = tk.Frame(toast)
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+        strip = tk.Frame(card, width=3)
+        strip.pack(side="left", fill="y")
+        body = tk.Frame(card)
+        body.pack(side="left", fill="both", expand=True, padx=(11, 14),
+                  pady=theme.PAD["md"])
+
+        tile = tk.Frame(body, width=30, height=30)
+        tile.pack(side="left", padx=(0, 10))
+        tile.pack_propagate(False)
+        tile_lbl = tk.Label(tile, text="✓", font=theme.ui_font(15, "bold"))
+        tile_lbl.pack(expand=True)
+
+        text_col = tk.Frame(body)
+        text_col.pack(side="left", fill="both", expand=True)
+        title_lbl = tk.Label(text_col, text=message, anchor="w",
+                             font=theme.ui_font(theme.SIZE["body"], "bold"))
+        title_lbl.pack(anchor="w")
+        meta_lbl = None
+        if meta:
+            meta_lbl = tk.Label(text_col, text=meta, anchor="w",
+                                font=theme.ui_font(theme.SIZE["meta"]))
+            meta_lbl.pack(anchor="w", pady=(1, 0))
+
+        def close():
+            if toast.winfo_exists():
+                toast.destroy()
+
+        # tk.Button ignores bg on macOS's aqua theme, so the two actions are
+        # click-bound labels — the only way to hold the accent fill on every OS.
+        buttons: list[tuple[tk.Label, bool, tk.Frame]] = []
+
+        def add_button(label: str, callback, primary: bool):
+            # The border is a 1px frame showing through an inset, the same
+            # trick the card itself uses. highlightthickness on an aqua Label
+            # paints a ring straight through the text.
+            edge = tk.Frame(body)
+            edge.pack(side="left", padx=(theme.PAD["sm"], 0))
+            btn = tk.Label(edge, text=label, cursor=cursor, padx=12, pady=6,
+                           highlightthickness=0, borderwidth=0,
+                           font=theme.ui_font(theme.SIZE["chip"], "bold"))
+            btn.pack(padx=1, pady=1)
+            for w in (edge, btn):
+                w.bind("<Button-1>", lambda _e: (callback(), close()))
+            buttons.append((btn, primary, edge))
+
         if action:
-            label, callback = action
-            tk.Button(
-                toast, text=label, relief="flat", borderwidth=0,
-                bg="#1c1c1e", fg="#8ab8f0", activebackground="#1c1c1e",
-                activeforeground="white", highlightthickness=0,
-                font=("Helvetica", 12, "bold"), cursor="pointinghand"
-                if sys.platform == "darwin" else "hand2",
-                command=lambda: (callback(),
-                                 toast.destroy() if toast.winfo_exists() else None),
-            ).pack(side="right", padx=(0, 14))
+            add_button(action[0], action[1], True)
+        if folder is not None:
+            add_button("Folder", lambda: reveal_in_folder(folder), False)
+
+        def style(_mode=None):
+            if not toast.winfo_exists():
+                return
+            surface = theme.resolve(theme.SURFACE)
+            toast.configure(bg=theme.resolve(theme.BORDER))
+            strip.configure(bg=theme.resolve(theme.SUCCESS))
+            for frame in (card, body, text_col, tile):
+                frame.configure(bg=surface)
+            tile.configure(bg=theme.resolve(theme.SUCCESS_TINT))
+            tile_lbl.configure(bg=theme.resolve(theme.SUCCESS_TINT),
+                               fg=theme.resolve(theme.SUCCESS))
+            title_lbl.configure(bg=surface, fg=theme.resolve(theme.TEXT))
+            if meta_lbl is not None:
+                meta_lbl.configure(bg=surface,
+                                   fg=theme.resolve(theme.TEXT_TERTIARY))
+            for btn, primary, edge in buttons:
+                if primary:
+                    btn.configure(bg=theme.resolve(theme.ACCENT),
+                                  fg=theme.resolve(theme.ON_ACCENT))
+                    edge.configure(bg=theme.resolve(theme.ACCENT))
+                else:
+                    btn.configure(bg=surface, fg=theme.resolve(theme.TEXT))
+                    edge.configure(bg=theme.resolve(theme.BORDER_STRONG))
+
+        style()
+        theme.bind_mode_change(toast, style)
+
+        # A full update(), not merely update_idletasks(): the labels carry
+        # CTkFonts, and until Tk has actually realised those fonts the toplevel
+        # under-reports its requested width — which clipped the trailing action
+        # button off the card, the one thing a toast with actions must not do.
+        self.root.update_idletasks()
+        toast.update()
+        tw = toast.winfo_reqwidth()
+        th = toast.winfo_reqheight()
+        toast.geometry(f"{tw}x{th}")
+        rx, ry = self.root.winfo_x(), self.root.winfo_y()
+        rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        tx = rx + rw - tw - 20
+        # Float clear of the footer: the generate buttons live there, and a
+        # notification that covers the controls it is reporting on is worse
+        # than one that sits above them.
+        ty_end = ry + rh - th - theme.HEIGHT["footer"] - 16
+        ty_start = ty_end + 20
+        toast.geometry(f"+{tx}+{ty_start}")
 
         steps = 8
         for i in range(steps + 1):
             y = int(ty_start + (ty_end - ty_start) * i / steps)
             self.root.after(int(i * 180 / steps),
-                            lambda _y=y: toast.geometry(f"{tw}x{th}+{tx}+{_y}") if toast.winfo_exists() else None)
+                            lambda _y=y: toast.geometry(f"+{tx}+{_y}") if toast.winfo_exists() else None)
         linger = 6000 if action else 1800
-        self.root.after(linger, lambda: toast.destroy() if toast.winfo_exists() else None)
+        self.root.after(linger, close)
 
     # ------------------------------------------------------------------ #
     # Spinner helpers                                                       #
@@ -1066,10 +1258,11 @@ class App:
         self._set_toolbar_enabled(True)
         if session.source_name:
             self._source_lbl.configure(text=f"from {session.source_name}")
+        self._show_output_dir_status()
 
     def _show_editor_surface(self):
         """Full-bleed editor; flow column hidden."""
-        self.flow.grid_remove()
+        self._flow_host.grid_remove()
         self.action_section.grid_remove()
         self.editor_section.grid(row=0, column=0, sticky="nsew",
                                  padx=14, pady=(10, 8))
@@ -1082,7 +1275,7 @@ class App:
         self._set_toolbar_enabled(False)
         self._set_project_title(None)
         self._source_lbl.configure(text="")
-        self._issues_lbl.configure(text="")
+        self._outdir_lbl.configure(text="")
 
     def _open_session_path(self, path: Path):
         """Open a saved .dmps project, offering crash recovery when present."""
@@ -1206,8 +1399,11 @@ class App:
                 if self.editor is not None:
                     self._ws_epoch = self.editor.edit_epoch
                 rev = out_path.stem.rsplit("_rev", 1)[-1]
-                self._show_toast(f"Worksheet rev {rev} ready",
-                                 action=("Open", lambda: open_file(out_path)))
+                self._show_toast(
+                    f"Worksheet rev {rev} ready",
+                    action=("Open", lambda: open_file(out_path)),
+                    meta=f"{out_path.name} · {len(design.zones)} zones",
+                    folder=out_path)
 
             def on_error(exc):
                 self._set_generating(None)
@@ -1260,8 +1456,12 @@ class App:
             self._set_generating(None)
             self.door_chart_path = chart_path
             rev = chart_path.stem.rsplit("_rev", 1)[-1]
-            self._show_toast(f"Door chart rev {rev} ready",
-                             action=("Open", lambda: open_file(chart_path)))
+            zones = len(self.session.design.zones) if self.session else 0
+            self._show_toast(
+                f"Door chart rev {rev} ready",
+                action=("Open", lambda: open_file(chart_path)),
+                meta=f"{chart_path.name} · {zones} zones",
+                folder=chart_path)
 
         def on_error(exc):
             self._set_generating(None)
@@ -1298,36 +1498,45 @@ class App:
         dlg = ctk.CTkToplevel(self.root)
         dlg.title("Generate RemoteLink Account")
         dlg.geometry("520x240")
+        dlg.configure(fg_color=theme.APP_BG)
         dlg.transient(self.root)
         dlg.grab_set()
 
         ctk.CTkLabel(dlg, text="Generate RemoteLink Account",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(
+                     font=theme.ui_font(16, "bold"),
+                     text_color=theme.TEXT).pack(
             anchor="w", padx=20, pady=(18, 2))
         ctk.CTkLabel(
             dlg, text="Builds an encrypted .xml you import into RemoteLink.",
-            text_color=("gray40", "gray70")).pack(anchor="w", padx=20, pady=(0, 10))
+            font=theme.ui_font(theme.SIZE["chip"]),
+            text_color=theme.TEXT_SECOND).pack(anchor="w", padx=20, pady=(0, 10))
 
         form = ctk.CTkFrame(dlg, fg_color="transparent")
         form.pack(fill="x", padx=20)
         form.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(form, text="Account number").grid(
+        ctk.CTkLabel(form, text="Account number", text_color=theme.TEXT,
+                     font=theme.ui_font(theme.SIZE["body"])).grid(
             row=0, column=0, sticky="w", pady=6)
         acct_var = ctk.StringVar(value=default_account)
-        ctk.CTkEntry(form, textvariable=acct_var).grid(
+        ctk.CTkEntry(form, textvariable=acct_var, fg_color=theme.SURFACE,
+                     border_color=theme.BORDER_STRONG, text_color=theme.TEXT,
+                     corner_radius=theme.RADIUS["button"]).grid(
             row=0, column=1, sticky="ew", pady=6)
 
-        ctk.CTkLabel(form, text="Passphrase").grid(row=1, column=0, sticky="w", pady=6)
+        ctk.CTkLabel(form, text="Passphrase", text_color=theme.TEXT,
+                     font=theme.ui_font(theme.SIZE["body"])).grid(
+            row=1, column=0, sticky="w", pady=6)
         pass_var = ctk.StringVar(value="")
-        ctk.CTkEntry(form, textvariable=pass_var, show="•").grid(
+        ctk.CTkEntry(form, textvariable=pass_var, show="•",
+                     fg_color=theme.SURFACE, border_color=theme.BORDER_STRONG,
+                     text_color=theme.TEXT,
+                     corner_radius=theme.RADIUS["button"]).grid(
             row=1, column=1, sticky="ew", pady=6)
 
         btns = ctk.CTkFrame(dlg, fg_color="transparent")
         btns.pack(fill="x", padx=20, pady=16)
-        ctk.CTkButton(btns, text="Cancel", width=90, fg_color="transparent",
-                      border_width=1, text_color=("gray30", "gray80"),
-                      command=dlg.destroy).pack(side="left")
+        secondary_button(btns, "Cancel", dlg.destroy, width=90).pack(side="left")
 
         def submit():
             account_num = acct_var.get().strip()
@@ -1347,8 +1556,7 @@ class App:
             dlg.destroy()
             self._run_generate_remotelink(account_num, passphrase)
 
-        ctk.CTkButton(btns, text="Generate", width=120, fg_color=ACCENT,
-                      hover_color=ACCENT_HOVER, command=submit).pack(side="right")
+        primary_button(btns, "Generate", submit, width=120).pack(side="right")
 
     def _run_generate_remotelink(self, account_num, passphrase):
         design = self.session.design
@@ -1370,9 +1578,11 @@ class App:
             self._set_generating(None)
             # A generated account still needs its per-site comm / IP / panel
             # settings entered in Remote Link. Generating ≠ commissioning.
-            self._show_toast(f"RemoteLink .xml for {account_num} ready — "
-                             "import it into RemoteLink",
-                             action=("Open", lambda: open_file(path)))
+            self._show_toast(
+                f"RemoteLink account {account_num} ready",
+                action=("Open", lambda: open_file(path)),
+                meta=f"{Path(path).name} · import it into RemoteLink",
+                folder=Path(path))
 
         def on_error(exc):
             self._set_generating(None)
@@ -1480,17 +1690,24 @@ class App:
         self._update_dialog = dlg
         dlg.title("Update Available")
         dlg.geometry("460x420")
+        dlg.configure(fg_color=theme.APP_BG)
         dlg.transient(self.root)
         dlg.protocol("WM_DELETE_WINDOW", lambda: self._close_update_dialog())
 
         cur = updater.current_version_str()
         ctk.CTkLabel(
             dlg, text=f"Version {info['tag'].lstrip('v')} is available",
-            font=ctk.CTkFont(size=16, weight="bold")).pack(padx=20, pady=(20, 2))
+            font=theme.ui_font(16, "bold"), text_color=theme.TEXT).pack(
+            padx=20, pady=(20, 2))
         ctk.CTkLabel(dlg, text=f"You have v{cur}.",
-                     text_color=("gray40", "gray70")).pack(padx=20, pady=(0, 10))
+                     font=theme.ui_font(theme.SIZE["chip"]),
+                     text_color=theme.TEXT_SECOND).pack(padx=20, pady=(0, 10))
 
-        notes = ctk.CTkTextbox(dlg, height=200, wrap="word")
+        notes = ctk.CTkTextbox(
+            dlg, height=200, wrap="word", fg_color=theme.SURFACE,
+            text_color=theme.TEXT, border_width=1, border_color=theme.BORDER,
+            corner_radius=theme.RADIUS["card"],
+            font=theme.ui_font(theme.SIZE["chip"]))
         notes.pack(fill="both", expand=True, padx=20)
         notes.insert("1.0", info["notes"] or "See the release page for details.")
         notes.configure(state="disabled")
@@ -1504,23 +1721,19 @@ class App:
             save_prefs(prefs)
             self._close_update_dialog()
 
-        ctk.CTkButton(btns, text="Later", width=90, fg_color="transparent",
-                      border_width=1, text_color=("gray30", "gray80"),
-                      command=later).pack(side="left")
+        secondary_button(btns, "Later", later, width=90).pack(side="left")
 
         if updater.can_self_update() and info["asset_url"]:
-            ctk.CTkButton(btns, text="Update Now", width=130,
-                          fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                          command=lambda: self._start_update(info, dlg, btns)
-                          ).pack(side="right")
+            primary_button(btns, "Update Now",
+                           lambda: self._start_update(info, dlg, btns),
+                           width=130).pack(side="right")
         else:
             # Dev run or missing asset — fall back to the download page.
-            ctk.CTkButton(
-                btns, text="Open Download Page", width=170,
-                fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                command=lambda: (webbrowser.open(info["html_url"]),
-                                 self._close_update_dialog())
-            ).pack(side="right")
+            primary_button(
+                btns, "Open Download Page",
+                lambda: (webbrowser.open(info["html_url"]),
+                         self._close_update_dialog()),
+                width=170).pack(side="right")
 
     def _close_update_dialog(self):
         if self._update_dialog is not None and self._update_dialog.winfo_exists():
@@ -1536,17 +1749,20 @@ class App:
         dlg = ctk.CTkToplevel(self.root)
         dlg.title(title)
         dlg.geometry("560x520")
+        dlg.configure(fg_color=theme.APP_BG)
         dlg.transient(self.root)
-        ctk.CTkLabel(dlg, text=title,
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(
+        ctk.CTkLabel(dlg, text=title, font=theme.ui_font(16, "bold"),
+                     text_color=theme.TEXT).pack(
             anchor="w", padx=20, pady=(18, 8))
-        box = ctk.CTkTextbox(dlg, wrap="word")
+        box = ctk.CTkTextbox(
+            dlg, wrap="word", fg_color=theme.SURFACE, text_color=theme.TEXT,
+            border_width=1, border_color=theme.BORDER,
+            corner_radius=theme.RADIUS["card"],
+            font=theme.ui_font(theme.SIZE["chip"]))
         box.pack(fill="both", expand=True, padx=20, pady=(0, 8))
         box.insert("1.0", body)
         box.configure(state="disabled")
-        ctk.CTkButton(dlg, text="Close", width=90, fg_color=ACCENT,
-                      hover_color=ACCENT_HOVER,
-                      command=dlg.destroy).pack(pady=(0, 16))
+        primary_button(dlg, "Close", dlg.destroy, width=90).pack(pady=(0, 16))
 
     def _show_workflow_help(self):
         self._show_help_text("Field-Edit Workflow", _WORKFLOW_HELP)
@@ -1577,9 +1793,11 @@ class App:
         """Download the new build with a progress bar, then swap + relaunch."""
         for child in btns.winfo_children():
             child.destroy()
-        status = ctk.CTkLabel(btns, text="Downloading…")
+        status = ctk.CTkLabel(btns, text="Downloading…", text_color=theme.TEXT,
+                              font=theme.ui_font(theme.SIZE["chip"]))
         status.pack(side="left")
-        bar = ctk.CTkProgressBar(btns, width=200)
+        bar = ctk.CTkProgressBar(btns, width=200, progress_color=theme.ACCENT,
+                                 fg_color=theme.SURFACE_CHIP)
         bar.set(0)
         bar.pack(side="right")
 

@@ -19,9 +19,10 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
+import theme
 from hardware import snapshot_refs, diff_refs
 from session import Session, save_session, sync_master_zones, write_recovery, clear_recovery
-from validation import validate_design, badge_counts
+from validation import validate_design, badge_counts, badge_counts_by_severity
 from editor_zones import ZonesTab
 from editor_tabs import (
     KeypadsTab,
@@ -30,11 +31,28 @@ from editor_tabs import (
     auto_hide_scrollbar,
     prompt_add_expander,
 )
-
-ACCENT = "#4a7bb8"
-ACCENT_HOVER = "#3a6aa8"
+from ui_widgets import (
+    Card,
+    Chip,
+    ShortcutChip,
+    add_hover,
+    bind_click,
+    primary_button,
+    secondary_button,
+)
 
 RECOVERY_DEBOUNCE_MS = 5000
+
+# Tab strip metrics from the handoff: 22px between tabs, 5px label→badge gap.
+TAB_GAP = 22
+BADGE_GAP = 5
+
+# The pre-generate sheet is anchored over the editor, so it sizes itself.
+SHEET_WIDTH = 460
+# How many issue rows the pre-generate sheet shows before it starts scrolling,
+# and the height one row occupies.
+SHEET_VISIBLE_ROWS = 4
+SHEET_ROW_HEIGHT = 46
 
 
 def _format_install_date(d) -> str:
@@ -48,6 +66,222 @@ def _format_install_date(d) -> str:
     return f"{d.strftime('%B').upper()} {n}{suffix} {d.year}"
 
 TAB_TITLES = ["SITE", "ZONES", "SPLITTERS", "KEYPADS", "POWER"]
+
+
+def _bind_click_tree(widget, command):
+    """Make a composite widget clickable all the way through.
+
+    ui_widgets.bind_click reaches a CTkFrame's *canvas*, which its child labels
+    cover — so a click on the text of a chip or a tab would fall through. Walk
+    the frames and bind each level; stop at CTkLabel, whose own bind() already
+    covers both its canvas and its inner tk.Label.
+    """
+    bind_click(widget, command)
+    if isinstance(widget, ctk.CTkFrame):
+        for child in widget.winfo_children():
+            _bind_click_tree(child, command)
+
+
+def _bind_hover_tree(widget, on_enter, on_leave):
+    """Enter/Leave over a composite widget, including its children."""
+    widget.bind("<Enter>", on_enter, add="+")
+    widget.bind("<Leave>", on_leave, add="+")
+    if isinstance(widget, ctk.CTkFrame):
+        for child in widget.winfo_children():
+            _bind_hover_tree(child, on_enter, on_leave)
+
+
+class TabBar(ctk.CTkFrame):
+    """A tab strip over a page stack, with CTkTabview's API.
+
+    CTkTabview drives its tabs from a segmented button, which can host neither
+    the validation badges nor the underline treatment the handoff calls for.
+    add() / tab() / set() / get() keep CTkTabview's contract exactly, so the
+    call sites don't care which one they're talking to; set_badges() is the
+    addition.
+    """
+
+    def __init__(self, master, **kw):
+        kw.setdefault("fg_color", "transparent")
+        kw.setdefault("corner_radius", 0)
+        super().__init__(master, **kw)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
+
+        self._strip = ctk.CTkFrame(self, fg_color=theme.SURFACE, corner_radius=0,
+                                   height=theme.HEIGHT["tabbar"])
+        self._strip.grid(row=0, column=0, sticky="ew")
+        self._strip.grid_propagate(False)
+        self._strip.rowconfigure(0, weight=1)
+
+        # width=1 on every childless frame: CTkFrame defaults to 200×200, and
+        # with nothing inside to shrink it that default becomes its real size.
+        ctk.CTkFrame(self, height=1, width=1, corner_radius=0,
+                     fg_color=theme.BORDER,
+                     ).grid(row=1, column=0, sticky="ew")
+
+        self._body = ctk.CTkFrame(self, fg_color=theme.APP_BG, corner_radius=0)
+        self._body.grid(row=2, column=0, sticky="nsew")
+        self._body.columnconfigure(0, weight=1)
+        self._body.rowconfigure(0, weight=1)
+
+        self._order: list[str] = []
+        self._pages: dict[str, ctk.CTkFrame] = {}
+        self._items: dict[str, dict] = {}
+        self._current: str | None = None
+
+    # -- CTkTabview API -----------------------------------------------------
+
+    def add(self, title: str) -> ctk.CTkFrame:
+        page = ctk.CTkFrame(self._body, fg_color="transparent")
+        page.grid(row=0, column=0, sticky="nsew")
+        self._pages[title] = page
+
+        col = len(self._order)
+        item = ctk.CTkFrame(self._strip, fg_color="transparent")
+        item.grid(row=0, column=col, sticky="ns",
+                  padx=(theme.PAD["lg"] if col == 0 else TAB_GAP, 0))
+        item.columnconfigure(0, weight=1)
+        item.rowconfigure(0, weight=1)
+        # The spacer column has to stay to the right of the newest tab, or the
+        # strip centres its tabs instead of packing them left.
+        self._strip.columnconfigure(col, weight=0)
+        self._strip.columnconfigure(col + 1, weight=1)
+
+        label_row = ctk.CTkFrame(item, fg_color="transparent")
+        label_row.grid(row=0, column=0)
+        bold = theme.ui_font(theme.SIZE["control"], "bold")
+        # Reserve the bold width up front: the active tab is heavier than the
+        # inactive one, and without a floor the whole strip shifts on select.
+        label_row.columnconfigure(0, minsize=bold.measure(title))
+        label = ctk.CTkLabel(label_row, text=title, text_color=theme.TEXT_SECOND,
+                             font=theme.ui_font(theme.SIZE["control"]))
+        label.grid(row=0, column=0)
+
+        underline = ctk.CTkFrame(item, height=2, width=1, corner_radius=0,
+                                 fg_color=theme.SURFACE)
+        underline.grid(row=1, column=0, sticky="ew")
+
+        self._items[title] = {"item": item, "row": label_row, "label": label,
+                              "underline": underline, "badges": [],
+                              "font_idle": label.cget("font"), "font_active": bold}
+        self._order.append(title)
+        _bind_click_tree(item, lambda t=title: self.set(t))
+        add_hover(label, text_color=theme.TEXT)
+        if self._current is None:
+            self.set(title)
+        return page
+
+    def tab(self, title: str) -> ctk.CTkFrame:
+        return self._pages[title]
+
+    def set(self, title: str):
+        if title not in self._pages:
+            return
+        self._current = title
+        self._pages[title].tkraise()
+        for name, item in self._items.items():
+            active = name == title
+            item["label"].configure(
+                text_color=theme.TEXT if active else theme.TEXT_SECOND,
+                font=item["font_active"] if active else item["font_idle"])
+            item["underline"].configure(
+                fg_color=theme.ACCENT if active else theme.SURFACE)
+
+    def get(self) -> str:
+        return self._current or ""
+
+    # -- badges -------------------------------------------------------------
+
+    def set_badges(self, counts: dict[str, dict[str, int]]):
+        """Paint badge_counts_by_severity() into the tab labels."""
+        for title, item in self._items.items():
+            for badge in item["badges"]:
+                badge.destroy()
+            item["badges"] = []
+            bucket = counts.get(title) or {}
+            if bucket.get("error"):
+                item["badges"].append(Chip(
+                    item["row"], str(bucket["error"]), variant="error_solid",
+                    size=theme.SIZE["badge"], pill=False, padx=5, pady=1))
+            if bucket.get("warning"):
+                item["badges"].append(Chip(
+                    item["row"], "⚠", variant="warning",
+                    size=theme.SIZE["badge"], pill=False, padx=5, pady=1))
+            for col, badge in enumerate(item["badges"], start=1):
+                badge.grid(row=0, column=col, padx=(BADGE_GAP, 0))
+                _bind_click_tree(badge, lambda t=title: self.set(t))
+
+
+class _PrimaryAction(ctk.CTkFrame):
+    """The footer's primary button, as a frame so it can hold a child widget.
+
+    A CTkButton is a single canvas item — there is nowhere to put the ⌘E chip
+    the handoff draws inside the button. configure() accepts `text` and
+    `state`, which is the whole surface set_generating() drives.
+    """
+
+    def __init__(self, master, text: str, shortcut_key: str, command, *,
+                 height: int = theme.HEIGHT["button"]):
+        super().__init__(master, fg_color=theme.ACCENT,
+                         corner_radius=theme.RADIUS["button"])
+        self._command = command
+        self._state = "normal"
+        self._hovering = False
+        self.rowconfigure(0, weight=1, minsize=height)
+        self.columnconfigure(0, weight=1)
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.grid(row=0, column=0, padx=14)
+        self._label = ctk.CTkLabel(
+            row, text=text, text_color=theme.ON_ACCENT,
+            font=theme.ui_font(theme.SIZE["control"], "bold"))
+        self._label.grid(row=0, column=0)
+        self._chip = ShortcutChip(row, shortcut_key)
+        self._chip.grid(row=0, column=1, padx=(theme.PAD["sm"], 0))
+
+        _bind_click_tree(self, self._invoke)
+        _bind_hover_tree(self, self._on_enter, self._on_leave)
+
+    def configure(self, require_redraw=False, **kwargs):
+        if "text" in kwargs:
+            self._label.configure(text=kwargs.pop("text"))
+        if "state" in kwargs:
+            self._set_state(kwargs.pop("state"))
+        if kwargs or require_redraw:
+            super().configure(require_redraw=require_redraw, **kwargs)
+
+    def _set_state(self, state: str):
+        self._state = state
+        if state == "disabled":
+            super().configure(fg_color=theme.BORDER_STRONG)
+            self._label.configure(text_color=theme.TEXT_TERTIARY)
+            self._chip.grid_remove()
+        else:
+            super().configure(fg_color=theme.ACCENT)
+            self._label.configure(text_color=theme.ON_ACCENT)
+            self._chip.grid()
+
+    def _invoke(self):
+        if self._state != "disabled":
+            self._command()
+
+    def _on_enter(self, _event=None):
+        self._hovering = True
+        if self._state != "disabled":
+            super().configure(fg_color=theme.ACCENT_HOVER)
+
+    def _on_leave(self, _event=None):
+        # Crossing onto a child fires Leave then Enter; defer so that pair
+        # doesn't flash the button back to its rest colour.
+        self._hovering = False
+        self.after(30, self._settle_hover)
+
+    def _settle_hover(self):
+        if self._hovering or not self.winfo_exists():
+            return
+        if self._state != "disabled":
+            super().configure(fg_color=theme.ACCENT)
 
 
 class EditorFrame(ctk.CTkFrame):
@@ -73,9 +307,15 @@ class EditorFrame(ctk.CTkFrame):
         self.on_validation_change = on_validation_change or (lambda text, ok: None)
         self._site_vars: dict[str, ctk.StringVar] = {}
         self._suspend_traces = False
+        # The pre-generate sheet lives inside this frame now, so nothing stops
+        # a second one opening on top of the first — this is the interlock.
+        self._sheet: dict | None = None
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
+        # Closing the project with the sheet open would strand its Escape
+        # binding on the root window.
+        self.bind("<Destroy>", lambda _e: self._close_sheet(), add="+")
         self._build_tabs()
         self.refresh_validation()
 
@@ -158,22 +398,20 @@ class EditorFrame(ctk.CTkFrame):
         if btn is None:
             return
         if self.dirty:
-            btn.configure(text="Save", state="normal",
-                          fg_color=ACCENT, hover_color=ACCENT_HOVER)
+            btn.configure(text="Save", state="normal", fg_color=theme.ACCENT,
+                          hover_color=theme.ACCENT_HOVER,
+                          text_color=theme.ON_ACCENT)
         else:
             btn.configure(text="Saved ✓", state="disabled",
-                          fg_color=("gray80", "gray30"))
+                          fg_color=theme.SURFACE_CHIP,
+                          text_color_disabled=theme.TEXT_TERTIARY)
 
     # ------------------------------------------------------------------ #
     # Tabs                                                                  #
     # ------------------------------------------------------------------ #
 
     def _build_tabs(self):
-        self.tabs = ctk.CTkTabview(
-            self,
-            segmented_button_selected_color=ACCENT,
-            segmented_button_selected_hover_color=ACCENT_HOVER,
-        )
+        self.tabs = TabBar(self)
         self.tabs.grid(row=0, column=0, sticky="nsew")
         for title in TAB_TITLES:
             self.tabs.add(title)
@@ -193,43 +431,60 @@ class EditorFrame(ctk.CTkFrame):
                                  ("POWER", PowerTab, "power_tab")]:
             widget = cls(self.tabs.tab(title), self.session, self._on_design_edit,
                          on_structure_change=self._on_structure_change,
-                         on_hardware_change=self.apply_hardware_change)
+                         on_hardware_change=self.apply_hardware_change,
+                         on_navigate=self.tabs.set)
             widget.grid(row=0, column=0, sticky="nsew")
             setattr(self, attr, widget)
 
-        # Bottom bar: Save (reflecting dirty state) plus the two generate
-        # actions. Generation runs in the background and never replaces the
-        # editor — outputs are revision-numbered artifacts you refresh at will.
-        bottom = ctk.CTkFrame(self, fg_color="transparent")
-        bottom.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        bottom.columnconfigure(1, weight=1)
+        self._build_footer()
 
+    def _build_footer(self):
+        """Footer bar: save state and open-issue chips left, the three generate
+        actions right. Generation runs in the background and never replaces the
+        editor — outputs are revision-numbered artifacts you refresh at will."""
+        # A 1px top rule, drawn as a border-coloured backing strip: CTkFrame
+        # borders are all four sides or none.
+        wrap = ctk.CTkFrame(self, fg_color=theme.BORDER, corner_radius=0)
+        wrap.grid(row=1, column=0, sticky="ew")
+        wrap.columnconfigure(0, weight=1)
+
+        bar = ctk.CTkFrame(wrap, fg_color=theme.CHROME, corner_radius=0,
+                           height=theme.HEIGHT["footer"])
+        bar.grid(row=0, column=0, sticky="ew", pady=(1, 0))
+        bar.grid_propagate(False)
+        bar.columnconfigure(1, weight=1)
+        bar.rowconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(bar, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="w", padx=(theme.PAD["lg"], 0))
+
+        # No save-state *text* here: the Save button below already carries the
+        # state, and the header pill carries the timestamp. A third copy in the
+        # footer just made the same fact shout three times.
         self._save_btn = ctk.CTkButton(
-            bottom, text="Save", height=30, width=120, fg_color=ACCENT,
-            hover_color=ACCENT_HOVER, font=ctk.CTkFont(weight="bold"),
-            command=self.save)
-        self._save_btn.grid(row=0, column=0, sticky="w")
+            left, text="Save", width=88, height=theme.HEIGHT["button_sm"],
+            corner_radius=theme.RADIUS["button"], command=self.save,
+            font=theme.ui_font(theme.SIZE["control"], "bold"),
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            text_color=theme.ON_ACCENT)
+        self._save_btn.pack(side="left", padx=(0, theme.PAD["sm"]))
 
-        gen_row = ctk.CTkFrame(bottom, fg_color="transparent")
-        gen_row.grid(row=0, column=2, sticky="e")
-        self._gen_ws_btn = ctk.CTkButton(
-            gen_row, text="Generate Worksheet", height=30, width=160,
-            fg_color="transparent", border_width=1, border_color=ACCENT,
-            text_color=ACCENT, hover_color=("gray90", "gray25"),
-            command=self._on_generate_worksheet)
-        self._gen_ws_btn.pack(side="left", padx=(0, 8))
-        self._gen_chart_btn = ctk.CTkButton(
-            gen_row, text="Generate Door Chart", height=30, width=160,
-            fg_color="transparent", border_width=1, border_color=ACCENT,
-            text_color=ACCENT, hover_color=("gray90", "gray25"),
-            command=self._on_generate_chart)
-        self._gen_chart_btn.pack(side="left", padx=(0, 8))
-        self._gen_rl_btn = ctk.CTkButton(
-            gen_row, text="Generate RemoteLink Account", height=30, width=200,
-            fg_color="transparent", border_width=1, border_color=ACCENT,
-            text_color=ACCENT, hover_color=("gray90", "gray25"),
-            command=self._on_generate_remotelink)
-        self._gen_rl_btn.pack(side="left")
+        self._issue_chips = ctk.CTkFrame(left, fg_color="transparent",
+                                         width=1, height=1)
+        self._issue_chips.pack(side="left")
+
+        right = ctk.CTkFrame(bar, fg_color="transparent")
+        right.grid(row=0, column=2, sticky="e", padx=(0, theme.PAD["lg"]))
+        self._gen_chart_btn = secondary_button(
+            right, "Generate Door Chart", self._on_generate_chart)
+        self._gen_chart_btn.pack(side="left", padx=(0, theme.PAD["sm"]))
+        self._gen_rl_btn = secondary_button(
+            right, "RemoteLink Account", self._on_generate_remotelink)
+        self._gen_rl_btn.pack(side="left", padx=(0, theme.PAD["sm"]))
+        self._gen_ws_btn = _PrimaryAction(
+            right, "Generate Worksheet", "E", self._on_generate_worksheet)
+        self._gen_ws_btn.pack(side="left")
+
         self._update_save_button()
 
     def set_generating(self, which: str | None):
@@ -245,7 +500,7 @@ class EditorFrame(ctk.CTkFrame):
             state="disabled" if running else "normal")
         self._gen_rl_btn.configure(
             text="Generating…" if which == "remotelink"
-                 else "Generate RemoteLink Account",
+                 else "RemoteLink Account",
             state="disabled" if running else "normal")
 
     def _on_zones_edit(self):
@@ -288,10 +543,15 @@ class EditorFrame(ctk.CTkFrame):
             self._report_structure_change(changes)
 
     def _report_structure_change(self, changes):
-        """Modal summary of cascade fallout with per-tab 'Go to' routing."""
+        """Modal summary of cascade fallout with per-tab 'Go to' routing.
+
+        Still an OS window: this interrupts a destructive edit the tech didn't
+        ask for, so it should survive whatever they click next.
+        """
         win = ctk.CTkToplevel(self.root)
         win.title("Wiring updated")
         win.geometry("560x360")
+        win.configure(fg_color=theme.APP_BG)
         win.transient(self.root)
         win.grab_set()
 
@@ -299,12 +559,14 @@ class EditorFrame(ctk.CTkFrame):
         ctk.CTkLabel(
             win,
             text=f"{n} connection{'s' if n != 1 else ''} changed — review before generating",
-            font=ctk.CTkFont(size=14, weight="bold"), text_color="#c05621",
+            font=theme.ui_font(theme.SIZE["title"], "bold"),
+            text_color=theme.WARNING,
         ).pack(anchor="w", padx=20, pady=(18, 2))
         ctk.CTkLabel(
             win, text="Removing that hardware left these set to Spare or unsourced. "
             "“Wiring reviewed” was unchecked so you can confirm the new topology.",
-            wraplength=520, justify="left", text_color="gray40",
+            wraplength=520, justify="left", text_color=theme.TEXT_SECOND,
+            font=theme.ui_font(theme.SIZE["chip"]),
         ).pack(anchor="w", padx=20, pady=(0, 8))
 
         body = ctk.CTkScrollableFrame(win, fg_color="transparent")
@@ -313,7 +575,9 @@ class EditorFrame(ctk.CTkFrame):
         auto_hide_scrollbar(body)
         for r, ch in enumerate(changes):
             ctk.CTkLabel(body, text=f"•  {ch.message}", anchor="w",
-                         justify="left", wraplength=520).grid(
+                         justify="left", wraplength=520,
+                         text_color=theme.TEXT,
+                         font=theme.ui_font(theme.SIZE["chip"])).grid(
                 row=r, column=0, sticky="w", padx=8, pady=2)
 
         btns = ctk.CTkFrame(win, fg_color="transparent")
@@ -321,17 +585,15 @@ class EditorFrame(ctk.CTkFrame):
         affected_tabs = [t for t in ("SPLITTERS", "KEYPADS")
                          if any(c.tab == t for c in changes)]
         for tab_name in affected_tabs:
-            ctk.CTkButton(
-                btns, text=f"Review {tab_name}", height=32,
-                fg_color="transparent", border_width=1, border_color=ACCENT,
-                text_color=ACCENT, hover_color=("gray90", "gray25"),
-                command=lambda t=tab_name: (self.tabs.set(t),
-                                            win.grab_release(), win.destroy()),
-            ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btns, text="Dismiss", height=32, fg_color=ACCENT,
-                      hover_color=ACCENT_HOVER,
-                      command=lambda: (win.grab_release(), win.destroy()),
-                      ).pack(side="right")
+            secondary_button(
+                btns, f"Review {tab_name}",
+                lambda t=tab_name: (self.tabs.set(t), win.grab_release(),
+                                    win.destroy()),
+                height=theme.HEIGHT["input"],
+            ).pack(side="left", padx=(0, theme.PAD["sm"]))
+        primary_button(btns, "Dismiss",
+                       lambda: (win.grab_release(), win.destroy()),
+                       height=theme.HEIGHT["input"]).pack(side="right")
 
     def _add_expander_clicked(self):
         prompt_add_expander(self.root, self.session, self._on_structure_change)
@@ -366,90 +628,132 @@ class EditorFrame(ctk.CTkFrame):
         if not issues and not note:
             on_proceed()
             return
+        if self._sheet is not None:
+            self._sheet["card"].lift()
+            return
 
-        win = ctk.CTkToplevel(self.root)
-        win.title("Review before generating")
-        win.geometry("620x520")
-        win.transient(self.root)
-        win.grab_set()
+        # The scrim dims the tab area only: the sheet is anchored to the footer
+        # it belongs to, so covering the footer would leave it pointing at
+        # nothing. Tk has no alpha, so it's an opaque slate rather than a wash.
+        scrim = ctk.CTkFrame(self.tabs, fg_color=theme.SCRIM,
+                             corner_radius=0)
+        scrim.place(x=0, y=0, relwidth=1, relheight=1)
+        scrim.lift()
+
+        card = Card(self, corner_radius=theme.RADIUS["card"] + 2)
+        # place() refuses width/height, and a configured width loses to grid
+        # propagation — a column floor is the way to size the sheet.
+        card.columnconfigure(0, weight=1, minsize=SHEET_WIDTH)
+        card.place(relx=1.0, rely=1.0, anchor="se", x=-theme.PAD["lg"],
+                   y=-(theme.HEIGHT["footer"] + theme.PAD["sm"] + 1))
+        card.lift()
+
+        escape_id = self.root.bind("<Escape>", lambda _e: self._close_sheet(),
+                                   add="+")
+        self._sheet = {"scrim": scrim, "card": card, "escape_id": escape_id}
+        scrim.bind("<Button-1>", lambda _e: self._close_sheet())
 
         n = len(issues)
-        head = (f"{n} open issue{'s' if n != 1 else ''} — generate anyway, "
-                "or review first" if issues else "Heads up before generating")
-        ctk.CTkLabel(win, text=head, font=ctk.CTkFont(size=14, weight="bold"),
-                     text_color="#c05621").pack(anchor="w", padx=20, pady=(18, 8))
+        head = (f"{n} open issue{'s' if n != 1 else ''}" if issues
+                else "Heads up before generating")
+        ctk.CTkLabel(card, text=head, anchor="w", text_color=theme.TEXT,
+                     font=theme.ui_font(theme.SIZE["title"], "bold"),
+                     ).grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 0))
+        ctk.CTkLabel(
+            card, anchor="w", justify="left", wraplength=410,
+            text="Generation is never blocked — fix now or print and mark up "
+                 "with the super.",
+            text_color=theme.TEXT_SECOND, font=theme.ui_font(theme.SIZE["chip"]),
+        ).grid(row=1, column=0, sticky="ew", padx=18, pady=(2, 10))
+
+        row = 2
         if note:
-            ctk.CTkLabel(win, text=f"⚠  {note}", wraplength=560, justify="left",
-                         font=ctk.CTkFont(size=12), text_color="#c05621",
-                         ).pack(anchor="w", padx=20, pady=(0, 6))
-
-        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=12, pady=4)
-        body.columnconfigure(0, weight=1)
-        auto_hide_scrollbar(body)
-
-        row = 0
-        by_tab: dict[str, list] = {}
-        for issue in issues:
-            by_tab.setdefault(issue.tab, []).append(issue)
-        for tab_name in TAB_TITLES:
-            tab_issues = by_tab.get(tab_name)
-            if not tab_issues:
-                continue
-            ctk.CTkLabel(body, text=tab_name,
-                         font=ctk.CTkFont(size=12, weight="bold"),
-                         ).grid(row=row, column=0, sticky="w", padx=8, pady=(8, 2))
+            banner = Card(card, fg_color=theme.WARNING_ROW,
+                          border_color=theme.BANNER_BORDER, corner_radius=8)
+            banner.grid(row=row, column=0, sticky="ew", padx=18, pady=(0, 8))
+            banner.columnconfigure(0, weight=1)
+            ctk.CTkLabel(banner, text=f"⚠  {note}", anchor="w", justify="left",
+                         wraplength=380, text_color=theme.BANNER_TEXT,
+                         font=theme.ui_font(theme.SIZE["chip"], "bold"),
+                         ).grid(row=0, column=0, sticky="ew", padx=10, pady=8)
             row += 1
-            for issue in tab_issues:
-                line = ctk.CTkFrame(body, fg_color="transparent")
-                line.grid(row=row, column=0, sticky="ew", padx=8)
-                line.columnconfigure(1, weight=1)
-                is_err = issue.severity == "error"
-                ctk.CTkLabel(line, text="✗" if is_err else "⚠", width=20,
-                             text_color="#c0392b" if is_err else "#c05621",
-                             font=ctk.CTkFont(size=12, weight="bold"),
-                             ).grid(row=0, column=0)
-                ctk.CTkLabel(line, text=issue.message, anchor="w",
-                             font=ctk.CTkFont(size=11), wraplength=420,
-                             justify="left",
-                             ).grid(row=0, column=1, sticky="w")
 
-                def goto(i=issue):
-                    win.grab_release()
-                    win.destroy()
-                    self.goto_issue(i)
+        if issues:
+            # Four rows fit above the fold; past that the sheet scrolls rather
+            # than growing past the top of the editor. Short lists get a plain
+            # frame: a scroll container here would reserve its full height and
+            # park a scrollbar beside content that already fits.
+            #
+            # The scrolling branch deliberately does NOT get auto_hide_scrollbar.
+            # With a fixed height inside a place()d card, hiding the scrollbar
+            # changes the canvas width, which re-fires the geometry callback
+            # that decided to hide it — CTkScrollbar.set() → _draw() →
+            # update_idletasks() → set() then spins forever and wedges the app.
+            if len(issues) <= SHEET_VISIBLE_ROWS:
+                body = ctk.CTkFrame(card, fg_color="transparent")
+            else:
+                body = ctk.CTkScrollableFrame(
+                    card, fg_color="transparent",
+                    height=SHEET_VISIBLE_ROWS * SHEET_ROW_HEIGHT)
+            body.grid(row=row, column=0, sticky="ew", padx=12, pady=(0, 4))
+            body.columnconfigure(0, weight=1)
+            for i, issue in enumerate(issues):
+                self._build_issue_row(body, issue).grid(
+                    row=i, column=0, sticky="ew", padx=6, pady=3)
+            row += 1
 
-                ctk.CTkButton(line, text="Go to", width=56, height=24,
-                              fg_color="transparent", border_width=1,
-                              border_color=ACCENT, text_color=ACCENT,
-                              hover_color=("gray90", "gray25"), command=goto,
-                              ).grid(row=0, column=2, padx=(6, 0), pady=1)
-                row += 1
-
-        btn_row = ctk.CTkFrame(win, fg_color="transparent")
-        btn_row.pack(fill="x", padx=20, pady=(6, 18))
-        btn_row.columnconfigure(0, weight=1)
-        btn_row.columnconfigure(1, weight=1)
-
-        def close():
-            win.grab_release()
-            win.destroy()
-
-        ctk.CTkButton(btn_row, text="Review first", height=40,
-                      fg_color="transparent", border_width=2, border_color="gray60",
-                      text_color=("gray30", "gray80"),
-                      hover_color=("gray90", "gray25"), command=close,
-                      ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        footer = ctk.CTkFrame(card, fg_color="transparent")
+        footer.grid(row=row, column=0, sticky="ew", padx=18, pady=(8, 16))
+        footer.columnconfigure(0, weight=1, uniform="sheet")
+        footer.columnconfigure(1, weight=1, uniform="sheet")
 
         def proceed():
-            win.grab_release()
-            win.destroy()
+            self._close_sheet()
             on_proceed()
 
-        ctk.CTkButton(btn_row, text=proceed_label, height=40,
-                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                      font=ctk.CTkFont(weight="bold"), command=proceed,
-                      ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        secondary_button(footer, "Review first", self._close_sheet, height=36,
+                         ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        primary_button(footer, proceed_label, proceed, height=36,
+                       ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+    def _build_issue_row(self, parent, issue):
+        is_err = issue.severity == "error"
+        row = Card(parent, corner_radius=8,
+                   fg_color=theme.ERROR_TINT if is_err else theme.WARNING_ROW,
+                   border_color=theme.ERROR_BORDER if is_err
+                   else theme.BANNER_BORDER)
+        row.columnconfigure(1, weight=1)
+
+        dot = ctk.CTkFrame(row, width=7, height=7, corner_radius=4,
+                           fg_color=theme.ERROR if is_err else theme.WARNING)
+        dot.grid(row=0, column=0, padx=(10, 8), pady=8)
+        dot.grid_propagate(False)
+
+        ctk.CTkLabel(row, text=issue.message, anchor="w", justify="left",
+                     wraplength=250, text_color=theme.TEXT,
+                     font=theme.ui_font(theme.SIZE["chip"], "bold"),
+                     ).grid(row=0, column=1, sticky="w", pady=8)
+        ctk.CTkLabel(row, text=issue.tab, text_color=theme.TEXT_TERTIARY,
+                     font=theme.ui_font(theme.SIZE["label"]),
+                     ).grid(row=0, column=2, padx=8, pady=8)
+
+        goto = ctk.CTkLabel(row, text="Go to →", text_color=theme.ACCENT,
+                            font=theme.ui_font(theme.SIZE["chip"], "bold"))
+        goto.grid(row=0, column=3, padx=(0, 10), pady=8)
+        bind_click(goto, lambda i=issue: (self._close_sheet(), self.goto_issue(i)))
+        add_hover(goto, text_color=theme.ACCENT_HOVER)
+        return row
+
+    def _close_sheet(self):
+        """Dismiss the pre-generate sheet — Escape, the scrim, "Review first"."""
+        sheet, self._sheet = self._sheet, None
+        if sheet is None:
+            return
+        with contextlib.suppress(Exception):
+            self.root.unbind("<Escape>", sheet["escape_id"])
+        for key in ("card", "scrim"):
+            with contextlib.suppress(Exception):
+                sheet[key].destroy()
 
     # ------------------------------------------------------------------ #
     # Validation                                                            #
@@ -464,6 +768,9 @@ class EditorFrame(ctk.CTkFrame):
         else:
             text = "✓ no issues"
         self.on_validation_change(text, not counts)
+        if hasattr(self, "tabs"):
+            self.tabs.set_badges(badge_counts_by_severity(issues))
+        self._refresh_issue_chips(issues)
         if hasattr(self, "zones"):
             error_zones = set()
             for issue in issues:
@@ -471,6 +778,39 @@ class EditorFrame(ctk.CTkFrame):
                     error_zones.add(int(issue.ref.split(":", 1)[1]))
             self.zones.set_error_zones(error_zones)
         return issues
+
+    def _refresh_issue_chips(self, issues):
+        """One footer chip per tab with open issues; clicking jumps to it."""
+        holder = getattr(self, "_issue_chips", None)
+        if holder is None:
+            return
+        for widget in holder.winfo_children():
+            widget.destroy()
+        # A CTkFrame keeps the size its children gave it even after they're
+        # gone, so reset it — otherwise a cleared issue leaves a hole here.
+        holder.configure(width=1, height=1)
+        holder.pack_forget()
+        by_tab: dict[str, list] = {}
+        for issue in issues:
+            by_tab.setdefault(issue.tab, []).append(issue)
+        for tab_name in TAB_TITLES:
+            tab_issues = by_tab.get(tab_name)
+            if not tab_issues:
+                continue
+            # "SPLITTERS ⚠1" reads as a wiring fault; the unreviewed flag is a
+            # to-do, so it says so.
+            if (len(tab_issues) == 1
+                    and tab_issues[0].code == "topology.unconfirmed"):
+                text = "Wiring unreviewed"
+            else:
+                text = f"{tab_name} ⚠{len(tab_issues)}"
+            if not holder.winfo_manager():
+                holder.pack(side="left")
+            chip = Chip(holder, text, variant="warning",
+                        size=theme.SIZE["meta"], padx=10, pady=3)
+            chip.pack(side="left", padx=(0, 6))
+            add_hover(chip, border_color=theme.ACCENT)
+            _bind_click_tree(chip, lambda t=tab_name: self.tabs.set(t))
 
     # ------------------------------------------------------------------ #
     # SITE tab                                                              #
@@ -491,7 +831,7 @@ class EditorFrame(ctk.CTkFrame):
         # The SITE form doesn't need the full height — a centered, fixed-width
         # block reads better than fields stretched across a wide window.
         holder = ctk.CTkFrame(tab, fg_color="transparent", width=560)
-        holder.grid(row=0, column=0, pady=(8, 0))
+        holder.grid(row=0, column=0, pady=(theme.PAD["lg"], 0))
         holder.columnconfigure(0, weight=1, minsize=270)
         holder.columnconfigure(1, weight=1, minsize=270)
 
@@ -501,14 +841,24 @@ class EditorFrame(ctk.CTkFrame):
             col, row = i % 2, i // 2
             cell = ctk.CTkFrame(holder, fg_color="transparent")
             cell.grid(row=row, column=col, sticky="ew",
-                      padx=(0 if col == 0 else 8, 0), pady=4)
+                      padx=(0 if col == 0 else theme.PAD["sm"], 0),
+                      pady=theme.PAD["xs"])
             cell.columnconfigure(0, weight=1)
-            ctk.CTkLabel(cell, text=label, font=ctk.CTkFont(size=11),
-                         text_color="gray50", anchor="w").grid(row=0, column=0, sticky="w")
+            ctk.CTkLabel(cell, text=label, anchor="w",
+                         font=theme.ui_font(theme.SIZE["label"]),
+                         text_color=theme.TEXT_TERTIARY,
+                         ).grid(row=0, column=0, sticky="w", pady=(0, 2))
             var = ctk.StringVar(value=getattr(site, attr, None) or "")
             var.trace_add("write", lambda *_a, a=attr, v=var: self._on_site_edit(a, v))
-            entry = ctk.CTkEntry(cell, height=36, placeholder_text=label, textvariable=var)
+            entry = ctk.CTkEntry(
+                cell, height=theme.HEIGHT["input"], placeholder_text=label,
+                textvariable=var, fg_color=theme.SURFACE,
+                border_color=theme.BORDER_STRONG, border_width=1,
+                corner_radius=theme.RADIUS["button"], text_color=theme.TEXT,
+                placeholder_text_color=theme.TEXT_TERTIARY,
+                font=theme.ui_font(theme.SIZE["body"]))
             entry.grid(row=1, column=0, sticky="ew")
+            add_hover(entry, border_color=theme.ACCENT)
             self._site_vars[attr] = var
         self._suspend_traces = False
 
