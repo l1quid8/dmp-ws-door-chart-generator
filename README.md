@@ -44,7 +44,9 @@ generated from it and are never re-imported.
 - **ZONES** — searchable grid with inline editing and filter chips (All /
   Needs attention / Spares / Errors).
 - **SPLITTERS** — the wiring topology, CAD-print conflict resolution, and a
-  "Wiring reviewed against the riser diagram" checkbox.
+  "Wiring reviewed against the riser diagram" checkbox. A read-only **topology
+  tree** sits beside the cards so you can verify the derived 710-bus wiring at a
+  glance — click any node to jump to the card (or tab) that owns it.
 - **Hardware changes** — add or remove **714-16/714-8 expanders** (each brings
   its RSP + power supply + zone block — DMP bus addressing: module 7 starts
   Z601), **710 splitters** (LX or KP), and **keypads**. Removal re-points
@@ -82,6 +84,8 @@ Buttons at the bottom of the editor (also Worksheet menu / keyboard):
 > supply. The `.xml` scheme is documented in the injector repo's
 > `tools/XML_FORMAT.md`.
 
+![Generate RemoteLink Account](docs/screenshots/remotelink.png)
+
 If validation issues are open you get a summary with "Go to" jumps — generate
 anyway, or fix things first; your call.
 
@@ -99,6 +103,9 @@ file (plain JSON) under `<output>/Sessions/`. A debounced background recovery
 file guards against crashes; unsaved work is offered for recovery on reopen.
 In-app help lives under **Help → Field-Edit Workflow / Keyboard Shortcuts**,
 plus hover tooltips on the less obvious controls.
+
+A **light / dark** toggle in the header restyles the whole app instantly and
+remembers your choice for next launch.
 
 ## Repository layout
 
@@ -161,8 +168,10 @@ Once a colleague has any packaged build installed, it **updates itself** — no 
 re-sending zips. On launch (throttled to once/day) the app checks the public
 GitHub Releases API; if a newer release exists it shows an *"Update available"*
 dialog with the release notes and an **Update Now** button that downloads the new
-build, swaps the running app in place, and relaunches. There's also a manual
-**Help → Check for Updates…** menu item.
+build, swaps the running app in place, and relaunches. **Later** just closes the
+dialog — the daily check re-prompts on the next launch — while **Skip this
+version** silences that one release for good. A manual **Help → Check for
+Updates…** always works regardless (it ignores a skipped version).
 
 Because the app downloads the update itself, the new build opens **without** the
 Gatekeeper / SmartScreen warning seen on the first manual install. Releasing is
